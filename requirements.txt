@@ -1,0 +1,7 @@
+growwapi
+pandas
+pandas_ta
+agno
+duckduckgo-search
+streamlit
+
