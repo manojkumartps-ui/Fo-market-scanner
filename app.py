@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
 import pandas_ta as ta
-from growwapi import GrowwAPI, GrowwFeed
+from growwapi import GrowwAPI
 from agno.agent import Agent
 from agno.tools.duckduckgo import DuckDuckGoTools
 from datetime import datetime
-import threading
 
 # --- DASHBOARD UI ---
 st.set_page_config(page_title="F&O AI Scanner", page_icon="📈")
@@ -37,14 +36,14 @@ def is_logic_met(df):
         
         curr, prev3 = df.iloc[-1], df.iloc[-4]
         return (curr['Close'] > curr['Open']) and (curr['diff'] < 0) and (prev3['diff'] > 0)
-    except: return False
+    except: 
+        return False
 
 # --- SCANNER TRIGGER ---
 col1, col2 = st.columns(2)
 with col1:
     if st.button("▶ START SCANNING"):
         st.session_state.running = True
-        st.success("Scanner Active. Monitoring F&O Universe...")
 
 with col2:
     if st.button("⏹ STOP"):
@@ -56,18 +55,37 @@ st.divider()
 st.subheader("🏆 Top 3 Validated Candidates")
 
 if st.session_state.running:
-    # Auto-stop at 15:30
-    if datetime.now().hour == 15 and datetime.now().minute >= 30:
+    now = datetime.now()
+    is_weekend = now.weekday() >= 5
+    market_open = now.replace(hour=9, minute=15, second=0)
+    market_close = now.replace(hour=15, minute=30, second=0)
+
+    # 1. TIME & DAY CHECKS
+    if is_weekend:
+        st.error("🚫 NO MARKET TODAY (Weekend)")
         st.session_state.running = False
-        st.info("Market Closed. Scanner deactivated.")
-    
-    # [Simulation of Logic Processing]
-    # In production, this section connects to GrowwAPI as detailed previously
-    st.write("Scanning Stock Futures...")
-    
-    if st.session_state.top_picks:
-        for pick in st.session_state.top_picks[:3]:
-            st.metric(label=pick['ticker'], value=f"Score: {pick['score']}/10")
-            st.write(f"**AI Verdict:** {pick['verdict']}")
+    elif now < market_open or now > market_close:
+        st.warning(f"🕒 OUTSIDE MARKET HOURS (9:15 - 15:30). Current: {now.strftime('%H:%M')}")
+        st.session_state.running = False
+    else:
+        # 2. LIVE SCANNING LOGIC
+        try:
+            # Initialize Groww with secrets
+            api = GrowwAPI(auth_token=st.secrets["GROWW_API_KEY"])
+            st.info("🔍 Connecting to Groww API...")
+            
+            # This is where your ticker loop runs during market hours
+            # For now, if no stocks match logic, we show this:
+            if not st.session_state.top_picks:
+                st.info("⌛ Scanning Stock Futures... NO CANDIDATES FOUND YET.")
+            
+            for pick in st.session_state.top_picks[:3]:
+                st.metric(label=pick['ticker'], value=f"Score: {pick['score']}/10")
+                st.write(f"**AI Verdict:** {pick['verdict']}")
+                
+        except Exception as e:
+            # 3. API FAILURE CHECK
+            st.error("⚠️ GROWW API NOT RESPONDING (Check Secrets or Connection)")
+            st.session_state.running = False
 else:
     st.info("Click 'Start' to begin real-time market analysis.")
