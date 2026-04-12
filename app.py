@@ -3,7 +3,7 @@ import pandas as pd
 import pandas_ta as ta
 from growwapi import GrowwAPI, GrowwFeed
 from agno.agent import Agent
-from agno.tools.duckduckgo import DuckDuckGoTools
+from agno.tools.duckduckgo import DuckDuckGo
 from datetime import datetime
 import threading
 
@@ -19,7 +19,7 @@ if 'top_picks' not in st.session_state:
 
 # --- AI AGENT ---
 agent = Agent(
-    tools=[DuckDuckGoTools()],
+    tools=[DuckDuckGo()],
     instructions=["Analyze opinions for the stock. Rank by sentiment score 1-10."]
 )
 
