@@ -4,4 +4,3 @@ pandas_ta
 agno
 duckduckgo-search
 streamlit
-
