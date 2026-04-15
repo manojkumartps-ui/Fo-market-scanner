@@ -1,7 +1,9 @@
-growwapi
+streamlit
 pandas
 pandas_ta
+yfinance
 agno
 duckduckgo-search
-streamlit
-ddgs
+requests
+lxml
+html5lib
