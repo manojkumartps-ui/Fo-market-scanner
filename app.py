@@ -1,118 +1,92 @@
-import streamlit as st
 import pandas as pd
-import pandas_ta as ta
-import yfinance as yf
-from agno.agent import Agent
-from agno.tools.duckduckgo import DuckDuckGoTools
+from flask import Flask, render_template_string
 import requests
+from bs4 import BeautifulSoup
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import nltk
 
-# --- 1. PROGRAMMATIC F&O TICKER FETCH ---
-def get_fno_tickers():
+# Initialize Sentiment Analyzer
+nltk.download('vader_lexicon', quiet=True)
+sia = SentimentIntensityAnalyzer()
+
+app = Flask(__name__)
+
+# Logic 1: Build the F&O List
+def get_fno_list():
     try:
-        # Pulls the official NSE F&O underlying list
-        url = "https://nsearchives.nseindia.com/content/fo/fo_underlyinglist.htm"
-        header = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=header)
-        df_list = pd.read_html(res.text)
-        
-        # The list is usually in the first table
-        fno_df = df_list[0]
-        fno_df.columns = fno_df.iloc[0] # Set header
-        fno_df = fno_df[1:]
-        
-        # Format for yfinance (.NS suffix)
-        tickers = fno_df['UNDERLYING'].unique().tolist()
-        return [f"{str(t).strip()}.NS" for t in tickers if isinstance(t, str) and len(t) > 1]
+        url = "https://kite.trade"
+        df = pd.read_csv(url)
+        # Filter for NFO (NSE Futures & Options) segment
+        fno_df = df[df['exchange'] == 'NFO']
+        return sorted(fno_df['name'].unique().tolist())
     except Exception as e:
-        st.error(f"Could not fetch live NSE list: {e}")
-        return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "SBIN.NS"]
+        return []
 
-# --- 2. TECHNICAL LOGIC (Smoothed HA) ---
-def check_logic(df):
+# Logic 2: Crowd-Sourced Sentiment & Scoring
+def get_sentiment_score(ticker):
+    """
+    Scrapes recent headlines for a ticker and calculates a composite score.
+    Logic: Compound score > 0.05 is Bullish, < -0.05 is Bearish.
+    """
     try:
-        # Step 1: Initial Smoothing (5-period)
-        df['sC'] = ta.ema(df['Close'], length=5)
-        df['sO'] = ta.ema(df['Open'], length=5)
+        # Example using Finviz for sentiment (Common community source)
+        url = f'https://finviz.com{ticker}'
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers)
+        soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Step 2: Heikin-Ashi calculation
-        ha_c = (df['sO'] + df['High'] + df['Low'] + df['sC']) / 4
+        # Logic: Find the news table
+        news_table = soup.find(id='news-table')
+        if not news_table: return 0.0 # Neutral if no news
         
-        # Step 3: Second Smoothing (3-period)
-        df['o2'] = ta.ema(df['sO'], length=3)
-        df['c2'] = ta.ema(ha_c, length=3)
-        df['diff'] = df['o2'] - df['c2']
+        headlines = [row.a.text for row in news_table.findAll('tr')]
+        scores = [sia.polarity_scores(h)['compound'] for h in headlines[:10]]
         
-        # Signal Points
-        curr = df.iloc[-1]   # Today (D-1)
-        prev1 = df.iloc[-2]  # Yesterday
-        prev3 = df.iloc[-4]  # 3 days ago
-        
-        # Analysis
-        is_green = curr['Close'] > curr['Open']
-        
-        # Strict Match (Original Logic: Flip from + to - over 3 days)
-        strict_match = is_green and (curr['diff'] < 0) and (prev3['diff'] > 0)
-        
-        # Near Miss (For debugging: Flip happened in last 1-2 days)
-        near_miss = is_green and (curr['diff'] < 0) and (prev1['diff'] > 0)
-        
-        return strict_match, near_miss
-    except: 
-        return False, False
+        # Return average sentiment score
+        return round(sum(scores) / len(scores), 2) if scores else 0.0
+    except:
+        return 0.0
 
-# --- 3. AI AGENT SETUP ---
-agent = Agent(
-    tools=[DuckDuckGoTools()],
-    instructions=[
-        "Search for retail sentiment and crowd opinions on Indian finance forums, Twitter, and Reddit.",
-        "Provide a 'Crowd Sentiment Score' (1-10) for a bullish move.",
-        "Explain exactly what the 'crowd' is saying about this stock right now."
-    ]
-)
-
-# --- 4. STREAMLIT UI ---
-st.set_page_config(page_title="F&O AI Scanner", page_icon="📈", layout="wide")
-st.title("🛡️ Automated D-1 F&O AI Scanner")
-st.markdown("### Technical Logic: Smoothed HA Reversal | Sentiment: Crowd Pulse")
-
-if st.button("🚀 RUN FULL MARKET SCAN"):
-    with st.spinner("Fetching latest F&O list from NSE archives..."):
-        fno_list = get_fno_tickers()
+# Logic 3: Heikin Ashi Calculation
+def calculate_heikin_ashi(df):
+    ha_df = df.copy()
+    ha_df['HA_Close'] = (df['Open'] + df['High'] + df['Low'] + df['Close']) / 4
     
-    st.write(f"🔍 Found {len(fno_list)} F&O stocks. Analyzing D-1 patterns...")
+    ha_open = [(df['Open'].iloc[0] + df['Close'].iloc[0]) / 2]
+    for i in range(1, len(df)):
+        ha_open.append((ha_open[i-1] + ha_df['HA_Close'].iloc[i-1]) / 2)
     
+    ha_df['HA_Open'] = ha_open
+    ha_df['HA_High'] = ha_df[['HA_Open', 'HA_Close', 'High']].max(axis=1)
+    ha_df['HA_Low'] = ha_df[['HA_Open', 'HA_Close', 'Low']].min(axis=1)
+    return ha_df
+
+@app.route('/')
+def dashboard():
+    stocks = get_fno_list()[:15] # Limiting to 15 for speed
     results = []
-    near_misses = []
-    progress = st.progress(0)
     
-    for i, ticker in enumerate(fno_list):
-        # 60 days of D-1 data automatically fetched
-        df = yf.download(ticker, period="60d", interval="1d", progress=False)
-        
-        if not df.empty and len(df) > 10:
-            match, near = check_logic(df)
-            
-            if match:
-                st.success(f"🎯 Perfect Match: {ticker}")
-                with st.spinner(f"Agent scanning crowd sentiment for {ticker}..."):
-                    response = agent.run(f"Current crowd sentiment and retail pulse for {ticker} stock in India.")
-                    results.append({"ticker": ticker, "verdict": response.content})
-            elif near:
-                near_misses.append(ticker)
-        
-        progress.progress((i + 1) / len(fno_list))
+    for symbol in stocks:
+        score = get_sentiment_score(symbol)
+        sentiment_label = "Bullish" if score > 0.05 else "Bearish" if score < -0.05 else "Neutral"
+        results.append({"symbol": symbol, "score": score, "sentiment": sentiment_label})
 
-    # --- DISPLAY RESULTS ---
-    st.divider()
-    if results:
-        st.subheader("🏆 Validated Top Picks")
-        for res in results:
-            with st.expander(f"📈 {res['ticker']} - AI Analysis"):
-                st.markdown(res['verdict'])
-    
-    if near_misses:
-        st.subheader("⚠️ Near Misses (Debug)")
-        st.info(f"The following stocks turned green and are flipping trend, but didn't meet the strict '3-day ago' rule: {', '.join(near_misses)}")
+    html = """
+    <body style="font-family: sans-serif; padding: 20px;">
+        <h1>NSE F&O Sentiment Dashboard</h1>
+        <table border="1" cellpadding="10" style="border-collapse: collapse;">
+            <tr><th>Symbol</th><th>Sentiment Score (-1 to 1)</th><th>Crowd Bias</th></tr>
+            {% for item in data %}
+            <tr>
+                <td>{{ item.symbol }}</td>
+                <td style="color: {{ 'green' if item.score > 0 else 'red' }}">{{ item.score }}</td>
+                <td><b>{{ item.sentiment }}</b></td>
+            </tr>
+            {% endfor %}
+        </table>
+    </body>
+    """
+    return render_template_string(html, data=results)
 
-    if not results and not near_misses:
-        st.warning("No candidates found. The current market trend might be too strong in one direction to trigger a reversal.")
+if __name__ == '__main__':
+    app.run(debug=True)
