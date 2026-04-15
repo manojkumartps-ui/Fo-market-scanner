@@ -1,91 +1,84 @@
 import streamlit as st
 import pandas as pd
 import pandas_ta as ta
-from growwapi import GrowwAPI
+import yfinance as yf
 from agno.agent import Agent
 from agno.tools.duckduckgo import DuckDuckGoTools
-from datetime import datetime
+import time
 
-# --- DASHBOARD UI ---
-st.set_page_config(page_title="F&O AI Scanner", page_icon="📈")
-st.title("🚀 F&O Market Scanner")
-
-# State to keep track of scanning
-if 'running' not in st.session_state:
-    st.session_state.running = False
-if 'top_picks' not in st.session_state:
-    st.session_state.top_picks = []
-
-# --- AI AGENT ---
-agent = Agent(
-    tools=[DuckDuckGoTools()],
-    instructions=["Analyze opinions for the stock. Rank by sentiment score 1-10."]
-)
-
-# --- TECHNICAL LOGIC (SMOOTHED HA) ---
+# --- 1. TECHNICAL LOGIC (Smoothed HA) ---
 def is_logic_met(df):
     try:
-        # Step 1 & 2: Smoothing and HA
+        # Step 1: Initial Smoothing
         df['sC'] = ta.ema(df['Close'], length=5)
         df['sO'] = ta.ema(df['Open'], length=5)
+        
+        # Step 2: Heikin-Ashi calculation
         ha_c = (df['sO'] + df['High'] + df['Low'] + df['sC']) / 4
+        
         # Step 3: Second Smoothing
         df['o2'] = ta.ema(df['sO'], length=3)
         df['c2'] = ta.ema(ha_c, length=3)
         df['diff'] = df['o2'] - df['c2']
         
-        curr, prev3 = df.iloc[-1], df.iloc[-4]
+        # Get D-1 (yesterday) and the day from 3 bars ago
+        curr = df.iloc[-1]
+        prev3 = df.iloc[-4]
+        
+        # Logic: Bullish Candle + Trend Reversal (diff flips from + to -)
         return (curr['Close'] > curr['Open']) and (curr['diff'] < 0) and (prev3['diff'] > 0)
-    except: 
+    except Exception: 
         return False
 
-# --- SCANNER TRIGGER ---
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("▶ START SCANNING"):
-        st.session_state.running = True
+# --- 2. SENTIMENT AGENT ---
+agent = Agent(
+    tools=[DuckDuckGoTools()],
+    instructions=[
+        "Search for retail sentiment and crowd opinions on Twitter, Reddit, and news sites.",
+        "Provide a 'Crowd Sentiment Score' (1-10) and a brief justification.",
+        "Highlight any major news that justifies why the crowd is bullish/bearish today."
+    ]
+)
 
-with col2:
-    if st.button("⏹ STOP"):
-        st.session_state.running = False
-        st.warning("Scanner Stopped.")
+# --- 3. UI SETUP ---
+st.set_page_config(page_title="F&O AI Scanner", page_icon="📈", layout="wide")
+st.title("🛡️ Automated D-1 F&O AI Scanner")
+st.markdown("### Technical Logic: Smoothed HA Reversal | Sentiment: Crowd Pulse")
 
-# --- RESULTS DISPLAY ---
-st.divider()
-st.subheader("🏆 Top 3 Validated Candidates")
+# The complete list of 180+ F&O stocks (abbreviated here for brevity)
+FNO_TICKERS = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "SBIN.NS", 
+    "BHARTIARTL.NS", "LICI.NS", "ITC.NS", "HINDUNILVR.NS", "LT.NS", "BAJFINANCE.NS",
+    "ADANIENT.NS", "ADANIPORTS.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS",
+    "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "TATASTEEL.NS",
+    "JSWSTEEL.NS", "POWERGRID.NS", "NTPC.NS", "M&M.NS", "HCLTECH.NS", "ONGC.NS"
+    # ... You can paste the remaining NSE F&O tickers here ...
+]
 
-if st.session_state.running:
-    now = datetime.now()
-    is_weekend = now.weekday() >= 5
-    market_open = now.replace(hour=9, minute=15, second=0)
-    market_close = now.replace(hour=15, minute=30, second=0)
-
-    # 1. TIME & DAY CHECKS
-    if is_weekend:
-        st.error("🚫 NO MARKET TODAY (Weekend)")
-        st.session_state.running = False
-    elif now < market_open or now > market_close:
-        st.warning(f"🕒 OUTSIDE MARKET HOURS (9:15 - 15:30). Current: {now.strftime('%H:%M')}")
-        st.session_state.running = False
+if st.button("🚀 RUN SCANNER"):
+    st.session_state.results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, ticker in enumerate(FNO_TICKERS):
+        status_text.text(f"Scanning {ticker} ({i+1}/{len(FNO_TICKERS)})")
+        
+        # TOUCH-FREE DATA: Automatically pulls 60 days of D-1 data
+        df = yf.download(ticker, period="60d", interval="1d", progress=False)
+        
+        if is_logic_met(df):
+            st.success(f"🎯 Pattern Match: {ticker}")
+            # Run the AI Crowd Sentiment Agent
+            with st.spinner("Analyzing Crowd Sentiment..."):
+                response = agent.run(f"Latest news and retail sentiment for {ticker} stock in India.")
+                st.session_state.results.append({"ticker": ticker, "verdict": response.content})
+        
+        progress_bar.progress((i + 1) / len(FNO_TICKERS))
+    
+    st.divider()
+    if st.session_state.results:
+        for res in st.session_state.results:
+            with st.expander(f"📈 {res['ticker']} - AI Analysis"):
+                st.markdown(res['verdict'])
     else:
-        # 2. LIVE SCANNING LOGIC
-        try:
-            # Initialize Groww with secrets
-            api = GrowwAPI(auth_token=st.secrets["GROWW_API_KEY"])
-            st.info("🔍 Connecting to Groww API...")
-            
-            # This is where your ticker loop runs during market hours
-            # For now, if no stocks match logic, we show this:
-            if not st.session_state.top_picks:
-                st.info("⌛ Scanning Stock Futures... NO CANDIDATES FOUND YET.")
-            
-            for pick in st.session_state.top_picks[:3]:
-                st.metric(label=pick['ticker'], value=f"Score: {pick['score']}/10")
-                st.write(f"**AI Verdict:** {pick['verdict']}")
-                
-        except Exception as e:
-            # 3. API FAILURE CHECK
-            st.error("⚠️ GROWW API NOT RESPONDING (Check Secrets or Connection)")
-            st.session_state.running = False
-else:
-    st.info("Click 'Start' to begin real-time market analysis.")
+        st.info("No candidates found meeting the reversal criteria for D-1.")
