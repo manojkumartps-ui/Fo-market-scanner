@@ -1,9 +1,6 @@
-streamlit
-pandas
-pandas_ta
-yfinance
-agno
-duckduckgo-search
-requests
-lxml
-html5lib
+Flask==3.0.0
+pandas==2.1.1
+requests==2.31.0
+beautifulsoup4==4.12.2
+nltk==3.8.1
+numpy==1.26.0
