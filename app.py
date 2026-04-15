@@ -4,81 +4,83 @@ import pandas_ta as ta
 import yfinance as yf
 from agno.agent import Agent
 from agno.tools.duckduckgo import DuckDuckGoTools
-import time
+import requests
 
-# --- 1. TECHNICAL LOGIC (Smoothed HA) ---
+# --- 1. PROGRAMMATIC F&O TICKER FETCH ---
+def get_fno_tickers():
+    try:
+        # Fetching the F&O list from a reliable public source
+        url = "https://www.niftytrader.in/nse-fo-lot-size"
+        header = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=header)
+        df_list = pd.read_html(res.text)
+        
+        # Typically the first table on this page contains the F&O symbols
+        fno_df = df_list[0]
+        # Clean symbols and add .NS for yfinance
+        tickers = fno_df['SYMBOL'].unique().tolist()
+        return [f"{t.strip()}.NS" for t in tickers if isinstance(t, str)]
+    except Exception as e:
+        # Fallback if scraping fails
+        return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS"]
+
+# --- 2. TECHNICAL LOGIC (Smoothed HA) ---
 def is_logic_met(df):
     try:
-        # Step 1: Initial Smoothing
+        # 60 days ensures these EMAs are mathematically stable
         df['sC'] = ta.ema(df['Close'], length=5)
         df['sO'] = ta.ema(df['Open'], length=5)
-        
-        # Step 2: Heikin-Ashi calculation
         ha_c = (df['sO'] + df['High'] + df['Low'] + df['sC']) / 4
         
-        # Step 3: Second Smoothing
         df['o2'] = ta.ema(df['sO'], length=3)
         df['c2'] = ta.ema(ha_c, length=3)
         df['diff'] = df['o2'] - df['c2']
         
-        # Get D-1 (yesterday) and the day from 3 bars ago
-        curr = df.iloc[-1]
-        prev3 = df.iloc[-4]
-        
-        # Logic: Bullish Candle + Trend Reversal (diff flips from + to -)
+        curr, prev3 = df.iloc[-1], df.iloc[-4]
         return (curr['Close'] > curr['Open']) and (curr['diff'] < 0) and (prev3['diff'] > 0)
-    except Exception: 
+    except: 
         return False
 
-# --- 2. SENTIMENT AGENT ---
+# --- 3. AI CROWD SENTIMENT AGENT ---
 agent = Agent(
     tools=[DuckDuckGoTools()],
     instructions=[
-        "Search for retail sentiment and crowd opinions on Twitter, Reddit, and news sites.",
-        "Provide a 'Crowd Sentiment Score' (1-10) and a brief justification.",
-        "Highlight any major news that justifies why the crowd is bullish/bearish today."
+        "Search for retail sentiment and crowd opinions on Indian finance forums, Twitter, and Reddit.",
+        "Provide a 'Crowd Confidence Score' (1-10) for a bullish move.",
+        "Summarize why the crowd is currently interested in this stock."
     ]
 )
 
-# --- 3. UI SETUP ---
-st.set_page_config(page_title="F&O AI Scanner", page_icon="📈", layout="wide")
-st.title("🛡️ Automated D-1 F&O AI Scanner")
-st.markdown("### Technical Logic: Smoothed HA Reversal | Sentiment: Crowd Pulse")
+# --- 4. STREAMLIT UI ---
+st.set_page_config(page_title="F&O AI Scanner", layout="wide")
+st.title("🚀 100% Touch-Free F&O AI Predictor")
 
-# The complete list of 180+ F&O stocks (abbreviated here for brevity)
-FNO_TICKERS = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "SBIN.NS", 
-    "BHARTIARTL.NS", "LICI.NS", "ITC.NS", "HINDUNILVR.NS", "LT.NS", "BAJFINANCE.NS",
-    "ADANIENT.NS", "ADANIPORTS.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS",
-    "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "TATASTEEL.NS",
-    "JSWSTEEL.NS", "POWERGRID.NS", "NTPC.NS", "M&M.NS", "HCLTECH.NS", "ONGC.NS"
-    # ... You can paste the remaining NSE F&O tickers here ...
-]
-
-if st.button("🚀 RUN SCANNER"):
-    st.session_state.results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+if st.button("▶ START SCAN"):
+    with st.spinner("Fetching live F&O list from NSE sources..."):
+        fno_list = get_fno_tickers()
     
-    for i, ticker in enumerate(FNO_TICKERS):
-        status_text.text(f"Scanning {ticker} ({i+1}/{len(FNO_TICKERS)})")
-        
-        # TOUCH-FREE DATA: Automatically pulls 60 days of D-1 data
+    st.write(f"🔍 Found {len(fno_list)} F&O stocks. Starting technical scan...")
+    
+    results = []
+    progress = st.progress(0)
+    
+    for i, ticker in enumerate(fno_list):
+        # Automatically pulls 60 days of D-1 data
         df = yf.download(ticker, period="60d", interval="1d", progress=False)
         
         if is_logic_met(df):
-            st.success(f"🎯 Pattern Match: {ticker}")
-            # Run the AI Crowd Sentiment Agent
-            with st.spinner("Analyzing Crowd Sentiment..."):
-                response = agent.run(f"Latest news and retail sentiment for {ticker} stock in India.")
-                st.session_state.results.append({"ticker": ticker, "verdict": response.content})
+            st.success(f"✅ Technical Pattern Match: {ticker}")
+            # AI Crowd Analysis
+            with st.spinner(f"Analyzing Crowd Sentiment for {ticker}..."):
+                response = agent.run(f"Current crowd sentiment and retail pulse for {ticker} stock in India.")
+                results.append({"ticker": ticker, "verdict": response.content})
         
-        progress_bar.progress((i + 1) / len(FNO_TICKERS))
-    
+        progress.progress((i + 1) / len(fno_list))
+
     st.divider()
-    if st.session_state.results:
-        for res in st.session_state.results:
-            with st.expander(f"📈 {res['ticker']} - AI Analysis"):
+    if results:
+        for res in results:
+            with st.expander(f"📈 {res['ticker']} - Crowd Sentiment Analysis"):
                 st.markdown(res['verdict'])
     else:
-        st.info("No candidates found meeting the reversal criteria for D-1.")
+        st.info("No candidates found meeting technical reversal criteria today.")
