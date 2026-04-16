@@ -87,4 +87,5 @@ if st.button("🔄 Run Full Market Scan"):
     c2.metric("Bullish Sentiment", len(df_results[df_results['Sentiment Score'] > 0.05]))
     c3.metric("Bearish Sentiment", len(df_results[df_results['Sentiment Score'] < -0.05]))
 
-    st.dataframe(df_results.style.background_gradient(subset=['Sentiment Score'], cmap='RdYlGn'), use_container_width=True)
+    # This avoids the styling error while still showing your data
+    st.dataframe(df_results, use_container_width=True)
