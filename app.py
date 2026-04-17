@@ -5,7 +5,7 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — Last Valid Signal Engine (CE/PE)")
+st.title("F&O Scanner — Latest Candle Signal Engine (CE/PE)")
 
 LEN1 = 5
 LEN2 = 3
@@ -90,9 +90,9 @@ def smoothed_ha(df):
     return o2, c2
 
 
-# ================= LAST VALID SIGNAL ENGINE =================
+# ================= LATEST CANDLE ENGINE =================
 
-def evaluate_last_signal(df):
+def evaluate_latest(df):
 
     df = df.dropna().copy()
     df["ATR"] = atr(df)
@@ -100,67 +100,56 @@ def evaluate_last_signal(df):
     o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
 
-    last_signal = "NONE"
-    last_trace = None
+    i = len(df) - 1  # ONLY LATEST CANDLE
 
-    # scan full history (THIS is key fix)
-    for i in range(2, len(df)):
+    atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
 
-        atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
-        if atr_pct < ATR_THRESHOLD:
-            continue
+    if atr_pct < ATR_THRESHOLD:
+        return "NEUTRAL", None
 
+    bullish = (
+        Hadiff.iloc[i-1] <= 0 and
+        Hadiff.iloc[i] > 0 and
+        df.Close.iloc[i] > df.Open.iloc[i]
+    )
 
-        bullish = (
-            Hadiff.iloc[i-1] <= 0 and
-            Hadiff.iloc[i] > 0 and
-            df.Close.iloc[i] > df.Open.iloc[i]
-        )
+    bearish = (
+        Hadiff.iloc[i-1] >= 0 and
+        Hadiff.iloc[i] < 0 and
+        df.Close.iloc[i] < df.Open.iloc[i]
+    )
 
-        bearish = (
-            Hadiff.iloc[i-1] >= 0 and
-            Hadiff.iloc[i] < 0 and
-            df.Close.iloc[i] < df.Open.iloc[i]
-        )
+    if bullish:
+        return "BUY", {
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "hadiff_curr": float(Hadiff.iloc[i]),
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i]),
+            "atr%": float(atr_pct)
+        }
 
+    if bearish:
+        return "SELL", {
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "hadiff_curr": float(Hadiff.iloc[i]),
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i]),
+            "atr%": float(atr_pct)
+        }
 
-        if bullish:
-            last_signal = "CE"
-            last_trace = {
-                "bar_index": i,
-                "hadiff_prev": float(Hadiff.iloc[i-1]),
-                "hadiff_curr": float(Hadiff.iloc[i]),
-                "close": float(df.Close.iloc[i]),
-                "open": float(df.Open.iloc[i]),
-                "atr%": float(atr_pct)
-            }
-
-
-        if bearish:
-            last_signal = "PE"
-            last_trace = {
-                "bar_index": i,
-                "hadiff_prev": float(Hadiff.iloc[i-1]),
-                "hadiff_curr": float(Hadiff.iloc[i]),
-                "close": float(df.Close.iloc[i]),
-                "open": float(df.Open.iloc[i]),
-                "atr%": float(atr_pct)
-            }
-
-
-    return last_signal, last_trace
+    return "NEUTRAL", None
 
 
 # ================= RUN =================
 
 if st.button("RUN SCAN"):
 
-    ce_list = []
-    pe_list = []
+    buy_list = []
+    sell_list = []
     neutral = []
 
-    ce_example = None
-    pe_example = None
+    buy_trace = None
+    sell_trace = None
 
     for s in symbols:
 
@@ -170,18 +159,17 @@ if st.button("RUN SCAN"):
 
         df = data[ticker]
 
-        signal, trace = evaluate_last_signal(df)
+        signal, trace = evaluate_latest(df)
 
+        if signal == "BUY":
+            buy_list.append(s)
+            if buy_trace is None:
+                buy_trace = {s: trace}
 
-        if signal == "CE":
-            ce_list.append(s)
-            if ce_example is None:
-                ce_example = {s: trace}
-
-        elif signal == "PE":
-            pe_list.append(s)
-            if pe_example is None:
-                pe_example = {s: trace}
+        elif signal == "SELL":
+            sell_list.append(s)
+            if sell_trace is None:
+                sell_trace = {s: trace}
 
         else:
             neutral.append(s)
@@ -189,13 +177,13 @@ if st.button("RUN SCAN"):
 
     # ================= OUTPUT =================
 
-    st.subheader("🟢 CE Candidates (Last Valid Signal)")
-    st.write(ce_list)
+    st.subheader("🟢 BUY Candidates (Latest Candle)")
+    st.write(buy_list)
 
-    st.subheader("🔴 PE Candidates (Last Valid Signal)")
-    st.write(pe_list)
+    st.subheader("🔴 SELL Candidates (Latest Candle)")
+    st.write(sell_list)
 
-    st.subheader("⚪ Neutral")
+    st.subheader("⚪ NEUTRAL")
     st.write(neutral)
 
 
@@ -203,8 +191,8 @@ if st.button("RUN SCAN"):
 
     st.divider()
 
-    st.subheader("🧠 CE Example Trace")
-    st.write(ce_example)
+    st.subheader("🧠 BUY Example Trace")
+    st.write(buy_trace)
 
-    st.subheader("🧠 PE Example Trace")
-    st.write(pe_example)
+    st.subheader("🧠 SELL Example Trace")
+    st.write(sell_trace)
