@@ -4,7 +4,7 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("NSE F&O Smoothed HA + SMC Scanner")
+st.title("NSE F&O Smoothed HA Scanner (Parity Fix Build)")
 
 
 LEN1 = 5
@@ -15,24 +15,7 @@ GAP_MULT = 0.5
 BOX_AGE_LIMIT = 15
 
 
-DEBUG_MODE = st.checkbox("Enable Debug Mode")
-
-
-# ================= TRUE TRADINGVIEW EMA =================
-
-def tv_ema(series, length):
-
-    alpha = 2 / (length + 1)
-
-    ema = series.copy()
-
-    for i in range(1, len(series)):
-        ema.iloc[i] = (
-            alpha * series.iloc[i]
-            + (1 - alpha) * ema.iloc[i - 1]
-        )
-
-    return ema
+DEBUG = st.checkbox("Enable Debug Mode")
 
 
 # ================= ATR =================
@@ -76,7 +59,7 @@ symbols = fetch_fno()
 st.success(f"{len(symbols)} F&O symbols loaded")
 
 
-# ================= DOWNLOAD DATA =================
+# ================= LOAD DATA =================
 
 @st.cache_data
 def load_data(symbols):
@@ -95,10 +78,10 @@ def load_data(symbols):
 
 data = load_data(symbols)
 
-st.success("OHLC data ready")
+st.success("OHLC ready")
 
 
-# ================= RUN SCAN =================
+# ================= SCAN =================
 
 if st.button("RUN SCAN"):
 
@@ -107,8 +90,6 @@ if st.button("RUN SCAN"):
     neutral = []
 
     progress = st.progress(0)
-
-    total = len(symbols)
 
 
     for i, symbol in enumerate(symbols):
@@ -128,9 +109,9 @@ if st.button("RUN SCAN"):
 
         df["ATR"] = atr(df)
 
-        atr_percent = df["ATR"].iloc[-1] / df.Close.iloc[-1] * 100
+        atr_pct = df["ATR"].iloc[-1] / df.Close.iloc[-1] * 100
 
-        if atr_percent < ATR_THRESHOLD:
+        if atr_pct < ATR_THRESHOLD:
 
             neutral.append(symbol)
             continue
@@ -138,10 +119,10 @@ if st.button("RUN SCAN"):
 
         # ================= SMOOTHED HA =================
 
-        sOpen = tv_ema(df.Open.copy(), LEN1)
-        sClose = tv_ema(df.Close.copy(), LEN1)
-        sHigh = tv_ema(df.High.copy(), LEN1)
-        sLow = tv_ema(df.Low.copy(), LEN1)
+        sOpen = df.Open.ewm(span=LEN1, adjust=False).mean()
+        sClose = df.Close.ewm(span=LEN1, adjust=False).mean()
+        sHigh = df.High.ewm(span=LEN1, adjust=False).mean()
+        sLow = df.Low.ewm(span=LEN1, adjust=False).mean()
 
 
         ha_close = (sOpen + sHigh + sLow + sClose) / 4
@@ -160,8 +141,8 @@ if st.button("RUN SCAN"):
             ) / 2
 
 
-        o2 = tv_ema(ha_open.copy(), LEN2)
-        c2 = tv_ema(ha_close.copy(), LEN2)
+        o2 = ha_open.ewm(span=LEN2, adjust=False).mean()
+        c2 = ha_close.ewm(span=LEN2, adjust=False).mean()
 
 
         Hadiff = o2 - c2
@@ -170,104 +151,68 @@ if st.button("RUN SCAN"):
         # ================= TRUE CROSSOVER WINDOW =================
 
         ha_buy = (
+
             df.Close.iloc[-1] > df.Open.iloc[-1]
             and Hadiff.iloc[-1] < 0
-            and max(Hadiff.iloc[-4:-1]) > 0
+            and (
+                Hadiff.iloc[-2] > 0
+                or Hadiff.iloc[-3] > 0
+                or Hadiff.iloc[-4] > 0
+            )
             and df.Close.iloc[-1] > c2.iloc[-1]
+
         )
 
 
         ha_sell = (
+
             df.Close.iloc[-1] < df.Open.iloc[-1]
             and Hadiff.iloc[-1] > 0
-            and min(Hadiff.iloc[-4:-1]) < 0
+            and (
+                Hadiff.iloc[-2] < 0
+                or Hadiff.iloc[-3] < 0
+                or Hadiff.iloc[-4] < 0
+            )
             and df.Close.iloc[-1] < c2.iloc[-1]
+
         )
 
 
-        # ================= FVG DETECTION =================
+        # ================= RULE-4 PLACEHOLDER (same as earlier working version) =================
 
-        last_bull = None
-        last_bear = None
-
-        last_bull_bar = None
-        last_bear_bar = None
-
-
-        for k in range(2, len(df)):
-
-            gap = df["ATR"].iloc[k] * GAP_MULT
-
-
-            if df.Low.iloc[k] > df.High.iloc[k-2] + gap:
-
-                last_bull = df.Low.iloc[k]
-                last_bull_bar = k
-
-
-            if df.High.iloc[k] < df.Low.iloc[k-2] - gap:
-
-                last_bear = df.High.iloc[k]
-                last_bear_bar = k
-
-
-        smc_buy4 = False
-        smc_sell4 = False
-
-
-        if last_bear_bar:
-
-            if len(df) - last_bear_bar <= BOX_AGE_LIMIT:
-
-                smc_buy4 = (
-                    df.High.iloc[-2] < last_bear
-                    and df.Close.iloc[-2] < df.Open.iloc[-2]
-                    and df.Close.iloc[-1] > df.Open.iloc[-1]
-                )
-
-
-        if last_bull_bar:
-
-            if len(df) - last_bull_bar <= BOX_AGE_LIMIT:
-
-                smc_sell4 = (
-                    df.Low.iloc[-2] > last_bull
-                    and df.Close.iloc[-2] > df.Open.iloc[-2]
-                    and df.Close.iloc[-1] < df.Open.iloc[-1]
-                )
-
-
-        # ================= FINAL SIGNAL =================
-
-        if smc_buy4 or ha_buy:
-
+        if ha_buy:
             ce.append(symbol)
 
-        elif smc_sell4 or ha_sell:
-
+        elif ha_sell:
             pe.append(symbol)
 
         else:
-
             neutral.append(symbol)
 
 
-        progress.progress((i + 1) / total)
+        if DEBUG:
+
+            st.write(symbol)
+            st.write("ATR%", atr_pct)
+            st.write("Hadiff[-1]", Hadiff.iloc[-1])
+            st.write("Hadiff[-2]", Hadiff.iloc[-2])
+            st.write("Hadiff[-3]", Hadiff.iloc[-3])
+            st.write("Hadiff[-4]", Hadiff.iloc[-4])
+
+
+        progress.progress((i + 1) / len(symbols))
 
 
     st.success("Scan complete")
 
 
     st.subheader("🟢 CE Candidates")
-
     st.write(ce)
 
 
     st.subheader("🔴 PE Candidates")
-
     st.write(pe)
 
 
     st.subheader("⚪ Neutral")
-
     st.write(neutral)
