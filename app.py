@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import time
+import requests
 
 st.set_page_config(layout="wide")
 
@@ -21,27 +21,44 @@ LEN2 = 3
 
 
 # =============================
-# FETCH NSE F&O SYMBOLS
+# FETCH NSE F&O SYMBOLS (FAST API)
 # =============================
 
 @st.cache_data(ttl=86400)
 def fetch_fno_symbols():
 
-    url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
 
-    df = pd.read_csv(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.nseindia.com/"
+    }
 
-    return sorted(df["SYMBOL"].dropna().unique())
+    session = requests.Session()
+
+    session.get("https://www.nseindia.com", headers=headers)
+
+    response = session.get(url, headers=headers)
+
+    data = response.json()
+
+    symbols = []
+
+    for item in data["data"]:
+        symbols.append(item["metadata"]["symbol"])
+
+    return sorted(list(set(symbols)))
 
 
 with st.spinner("Fetching NSE F&O universe..."):
     symbols = fetch_fno_symbols()
 
-st.success(f"{len(symbols)} F&O stocks loaded")
+st.success(f"{len(symbols)} F&O symbols loaded")
 
 
 # =============================
-# DOWNLOAD DATA
+# DOWNLOAD OHLC DATA
 # =============================
 
 @st.cache_data
@@ -59,7 +76,7 @@ def download_data(symbols):
     )
 
 
-with st.spinner("Downloading OHLC batch data..."):
+with st.spinner("Downloading market data..."):
     data = download_data(symbols)
 
 st.success("Market data ready")
@@ -70,7 +87,6 @@ st.success("Market data ready")
 # =============================
 
 def ema(series, length):
-
     return series.ewm(span=length, adjust=False).mean()
 
 
@@ -106,7 +122,7 @@ def pivot_low(series, length):
 
 
 # =============================
-# SCAN BUTTON
+# START SCAN BUTTON
 # =============================
 
 if st.button("🚀 Start Scan"):
@@ -128,14 +144,11 @@ if st.button("🚀 Start Scan"):
         ticker = stock + ".NS"
 
         if ticker not in data:
-
             continue
-
 
         df = data[ticker].dropna()
 
         if len(df) < 40:
-
             continue
 
 
@@ -146,7 +159,6 @@ if st.button("🚀 Start Scan"):
         if df["ATR%"].iloc[-1] < ATR_THRESHOLD:
 
             neutral.append(stock)
-
             continue
 
 
@@ -162,7 +174,6 @@ if st.button("🚀 Start Scan"):
         ha_open = ha_close.copy()
 
         ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0]) / 2
-
 
         for j in range(1, len(df)):
 
@@ -181,11 +192,8 @@ if st.button("🚀 Start Scan"):
         ha_buy = (
 
             df.Close.iloc[-1] > df.Open.iloc[-1]
-
             and Hadiff.iloc[-1] < 0
-
             and Hadiff.iloc[-4] > 0
-
             and df.Close.iloc[-1] > c2.iloc[-1]
 
         )
@@ -194,11 +202,8 @@ if st.button("🚀 Start Scan"):
         ha_sell = (
 
             df.Close.iloc[-1] < df.Open.iloc[-1]
-
             and Hadiff.iloc[-1] > 0
-
             and Hadiff.iloc[-4] < 0
-
             and df.Close.iloc[-1] < c2.iloc[-1]
 
         )
@@ -217,12 +222,10 @@ if st.button("🚀 Start Scan"):
 
 
         if not np.isnan(lastH):
-
             bull_break = df.Close.iloc[-1] > lastH
 
 
         if not np.isnan(lastL):
-
             bear_break = df.Close.iloc[-1] < lastL
 
 
@@ -231,34 +234,26 @@ if st.button("🚀 Start Scan"):
 
 
         if buy_signal:
-
             ce_candidates.append(stock)
 
         elif sell_signal:
-
             pe_candidates.append(stock)
 
         else:
-
             neutral.append(stock)
 
 
         progress.progress((i + 1) / total)
 
 
-    status.text("Scan complete")
+    status.text("Scan complete ✅")
 
 
     st.subheader("🟢 CE Candidates")
-
     st.write(ce_candidates)
 
-
     st.subheader("🔴 PE Candidates")
-
     st.write(pe_candidates)
 
-
     st.subheader("⚪ Neutral")
-
     st.write(neutral)
