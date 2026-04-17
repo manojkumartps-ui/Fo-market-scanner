@@ -5,10 +5,10 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("NSE F&O Strategy Engine (True PineScript Emulator)")
+st.title("NSE F&O Strategy Engine (Clean State Machine Build)")
 
 
-# ================= INPUTS =================
+# ================= SETTINGS =================
 
 LEN1 = 5
 LEN2 = 3
@@ -21,7 +21,7 @@ DEBUG = st.checkbox("Debug Mode")
 # ================= F&O SYMBOLS =================
 
 @st.cache_data(ttl=86400)
-def get_fno():
+def get_fno_symbols():
 
     session = requests.Session()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -31,20 +31,20 @@ def get_fno():
     url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
     data = session.get(url, headers=headers).json()
 
-    return sorted(list(set(
+    return sorted(set(
         x["metadata"]["symbol"]
         for x in data["data"]
-    )))
+    ))
 
 
-symbols = get_fno()
-st.success(f"F&O symbols loaded: {len(symbols)}")
+symbols = get_fno_symbols()
+st.success(f"Loaded F&O symbols: {len(symbols)}")
 
 
 # ================= DATA =================
 
 @st.cache_data
-def load(symbols):
+def load_data(symbols):
 
     tickers = [s + ".NS" for s in symbols]
 
@@ -58,129 +58,115 @@ def load(symbols):
     )
 
 
-data = load(symbols)
+data = load_data(symbols)
+st.success("OHLC loaded")
 
 
 # ================= ATR =================
 
-def calc_atr(df):
+def atr(df):
 
-    tr = np.maximum(
+    tr = pd.concat([
         df.High - df.Low,
-        np.maximum(
-            abs(df.High - df.Close.shift()),
-            abs(df.Low - df.Close.shift())
-        )
-    )
+        abs(df.High - df.Close.shift()),
+        abs(df.Low - df.Close.shift())
+    ], axis=1).max(axis=1)
 
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= TRUE PINE ENGINE =================
+# ================= HEIKIN ASHI =================
 
-def run_engine(df, symbol):
+def heikin_ashi(df):
 
-    df = df.dropna().copy()
+    ha_close = (df.Open + df.High + df.Low + df.Close) / 4
 
-    if len(df) < 60:
-        return None, None
-
-
-    atr = calc_atr(df).values
-
-
-    # -------- HA arrays --------
     ha_open = np.zeros(len(df))
-    ha_close = np.zeros(len(df))
-
     ha_open[0] = (df.Open.iloc[0] + df.Close.iloc[0]) / 2
-    ha_close[0] = (df.Open.iloc[0] + df.High.iloc[0] +
-                   df.Low.iloc[0] + df.Close.iloc[0]) / 4
-
-
-    # -------- Smoothed HA storage --------
-    o2 = np.zeros(len(df))
-    c2 = np.zeros(len(df))
-
-
-    ce = False
-    pe = False
-
-
-    # ================= BAR BY BAR =================
 
     for i in range(1, len(df)):
+        ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
 
-        # ---- HA CALC ----
-        ha_close[i] = (
-            df.Open.iloc[i] +
-            df.High.iloc[i] +
-            df.Low.iloc[i] +
-            df.Close.iloc[i]
-        ) / 4
-
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    return ha_open, ha_close
 
 
-        # ---- SMOOTH HA (EMA style approximation) ----
-        alpha1 = 2 / (LEN1 + 1)
-        alpha2 = 2 / (LEN2 + 1)
+# ================= ENGINE =================
 
-        if i == 1:
-            o2[i] = ha_open[i]
-            c2[i] = ha_close[i]
-        else:
-            o2[i] = alpha2 * (alpha1 * ha_open[i] + (1-alpha1)*o2[i-1]) + (1-alpha2)*o2[i-1]
-            c2[i] = alpha2 * (alpha1 * ha_close[i] + (1-alpha1)*c2[i-1]) + (1-alpha2)*c2[i-1]
+def run_strategy(df):
+
+    df = df.dropna().copy()
+    if len(df) < 60:
+        return "NONE"
 
 
-        hadiff = o2[i] - c2[i]
+    # ATR
+    df["ATR"] = atr(df)
 
 
-        # ================= ATR FILTER =================
+    # HA
+    ha_open, ha_close = heikin_ashi(df)
 
-        atr_pct = atr[i] / df.Close.iloc[i] * 100 if atr[i] else 0
 
-        if atr_pct < ATR_THRESHOLD:
+    # Smoothed HA
+    o1 = pd.Series(ha_open).ewm(span=LEN1, adjust=False).mean()
+    c1 = pd.Series(ha_close).ewm(span=LEN1, adjust=False).mean()
+
+    o2 = o1.ewm(span=LEN2, adjust=False).mean()
+    c2 = c1.ewm(span=LEN2, adjust=False).mean()
+
+    Hadiff = o2 - c2
+
+
+    state = "NONE"
+
+
+    # ================= STATE MACHINE =================
+
+    for i in range(5, len(df)):
+
+        atr_ok = (df["ATR"].iloc[i] / df.Close.iloc[i]) * 100 >= ATR_THRESHOLD
+
+        if not atr_ok:
             continue
 
 
-        # ================= SIGNAL LOGIC =================
-
-        # BUY
-        if (
+        bullish_flip = (
+            Hadiff.iloc[i] < 0 and
+            Hadiff.iloc[i-1] > 0 and
             df.Close.iloc[i] > df.Open.iloc[i]
-            and hadiff < 0
-            and o2[i-1] - c2[i-1] > 0
-            and df.Close.iloc[i] > c2[i]
-        ):
-            ce = True
+        )
 
-
-        # SELL
-        if (
+        bearish_flip = (
+            Hadiff.iloc[i] > 0 and
+            Hadiff.iloc[i-1] < 0 and
             df.Close.iloc[i] < df.Open.iloc[i]
-            and hadiff > 0
-            and o2[i-1] - c2[i-1] < 0
-            and df.Close.iloc[i] < c2[i]
-        ):
-            pe = True
+        )
 
 
-    return ce, pe
+        if bullish_flip:
+            state = "CE"
+
+        elif bearish_flip:
+            state = "PE"
+
+
+    return state
 
 
 # ================= RUN =================
 
 if st.button("RUN SCAN"):
 
-    ce_list = []
-    pe_list = []
-    neutral_list = []
+    ce = []
+    pe = []
+    neutral = []
 
     progress = st.progress(0)
 
-    for i, s in enumerate(symbols):
+    total = len(symbols)
+
+
+    for idx, s in enumerate(symbols):
 
         ticker = s + ".NS"
 
@@ -190,32 +176,34 @@ if st.button("RUN SCAN"):
         df = data[ticker]
 
 
-        ce, pe = run_engine(df, s)
+        state = run_strategy(df)
 
 
-        if ce:
-            ce_list.append(s)
-        elif pe:
-            pe_list.append(s)
+        if state == "CE":
+            ce.append(s)
+
+        elif state == "PE":
+            pe.append(s)
+
         else:
-            neutral_list.append(s)
+            neutral.append(s)
 
 
         if DEBUG:
-            st.write(s, "CE:", ce, "PE:", pe)
+            st.write(s, state)
 
 
-        progress.progress((i+1)/len(symbols))
+        progress.progress((idx+1)/total)
 
 
-    st.success("DONE")
+    st.success("SCAN COMPLETE")
 
 
     st.subheader("🟢 CE Candidates")
-    st.write(ce_list)
+    st.write(ce)
 
     st.subheader("🔴 PE Candidates")
-    st.write(pe_list)
+    st.write(pe)
 
     st.subheader("⚪ Neutral")
-    st.write(neutral_list)
+    st.write(neutral)
