@@ -5,10 +5,10 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("SMC + Smoothed HA Scanner (TradingView-Parity Version)")
+st.title("SMC + Smoothed HA Scanner (TradingView Parity Build)")
 
 
-# ================= SETTINGS =================
+# ================= PARAMETERS =================
 
 LEN1 = 5
 LEN2 = 3
@@ -19,8 +19,10 @@ ATR_THRESHOLD = 3.5
 GAP_MULT = 0.5
 BOX_AGE_LIMIT = 15
 
+DEBUG_MODE = st.checkbox("Enable Debug Mode")
 
-# ================= TRUE TV EMA =================
+
+# ================= TRUE TRADINGVIEW EMA =================
 
 def tv_ema(series, length):
 
@@ -51,7 +53,7 @@ def atr(df):
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= FETCH SYMBOLS =================
+# ================= FETCH NSE SYMBOLS =================
 
 @st.cache_data(ttl=86400)
 def fetch_symbols():
@@ -62,19 +64,16 @@ def fetch_symbols():
 
     session.get("https://www.nseindia.com", headers=headers)
 
-    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
-    data = session.get(url, headers=headers).json()
+    df = pd.read_csv(url)
 
-    return sorted([
-        x["metadata"]["symbol"]
-        for x in data["data"]
-    ])
+    return df["SYMBOL"].tolist()
 
 
 symbols = fetch_symbols()
 
-st.success(f"{len(symbols)} symbols loaded")
+st.success(f"{len(symbols)} NSE symbols loaded")
 
 
 # ================= DOWNLOAD DATA =================
@@ -89,13 +88,14 @@ def load_data(symbols):
         period="6mo",
         interval="1d",
         group_by="ticker",
-        threads=True
+        threads=True,
+        progress=False
     )
 
 
 data = load_data(symbols)
 
-st.success("OHLC ready")
+st.success("OHLC data ready")
 
 
 # ================= RUN SCAN =================
@@ -104,8 +104,12 @@ if st.button("RUN SCAN"):
 
     ce = []
     pe = []
+    neutral = []
 
     progress = st.progress(0)
+
+    total = len(symbols)
+
 
     for i, symbol in enumerate(symbols):
 
@@ -124,13 +128,16 @@ if st.button("RUN SCAN"):
 
         df["ATR"] = atr(df)
 
-        df["ATR%"] = df["ATR"] / df.Close * 100
+        atr_percent = df["ATR"].iloc[-1] / df.Close.iloc[-1] * 100
 
-        if df["ATR%"].iloc[-1] < ATR_THRESHOLD:
+        if atr_percent < ATR_THRESHOLD:
+
+            neutral.append(symbol)
+
             continue
 
 
-        # ================= TRUE TV SMOOTHED HA =================
+        # ================= SMOOTHED HA =================
 
         sOpen = tv_ema(df.Open.copy(), LEN1)
         sClose = tv_ema(df.Close.copy(), LEN1)
@@ -155,51 +162,179 @@ if st.button("RUN SCAN"):
 
 
         o2 = tv_ema(ha_open.copy(), LEN2)
-
         c2 = tv_ema(ha_close.copy(), LEN2)
 
 
         Hadiff = o2 - c2
 
 
-        # ================= HA SIGNAL =================
+        # ================= EXACT PINE PRECEDENCE BUY =================
 
         ha_buy = (
 
-            df.Close.iloc[-1] > df.Open.iloc[-1]
-            and Hadiff.iloc[-1] < 0
-            and max(Hadiff.iloc[-4:-1]) > 0
-            and df.Close.iloc[-1] > c2.iloc[-1]
+            (
+                df.Close.iloc[-1] > df.Open.iloc[-1]
+                and Hadiff.iloc[-1] < 0
+                and Hadiff.iloc[-2] > 0
+            )
+
+            or
+
+            Hadiff.iloc[-3] > 0
+
+            or
+
+            (
+                Hadiff.iloc[-4] > 0
+                and df.Close.iloc[-1] > c2.iloc[-1]
+            )
 
         )
 
+
+        # ================= EXACT PINE PRECEDENCE SELL =================
 
         ha_sell = (
 
-            df.Close.iloc[-1] < df.Open.iloc[-1]
-            and Hadiff.iloc[-1] > 0
-            and min(Hadiff.iloc[-4:-1]) < 0
-            and df.Close.iloc[-1] < c2.iloc[-1]
+            (
+                df.Close.iloc[-1] < df.Open.iloc[-1]
+                and Hadiff.iloc[-1] > 0
+                and Hadiff.iloc[-2] < 0
+            )
+
+            or
+
+            Hadiff.iloc[-3] < 0
+
+            or
+
+            (
+                Hadiff.iloc[-4] < 0
+                and df.Close.iloc[-1] < c2.iloc[-1]
+            )
 
         )
 
 
-        if ha_buy:
+        # ================= FVG DETECTION =================
+
+        last_bull_fvg_top = None
+        last_bull_bar = None
+
+        last_bear_fvg_bot = None
+        last_bear_bar = None
+
+
+        for k in range(2, len(df)):
+
+            gap = df["ATR"].iloc[k] * GAP_MULT
+
+
+            if df.Low.iloc[k] > df.High.iloc[k - 2] + gap:
+
+                last_bull_fvg_top = df.Low.iloc[k]
+
+                last_bull_bar = k
+
+
+            if df.High.iloc[k] < df.Low.iloc[k - 2] - gap:
+
+                last_bear_fvg_bot = df.High.iloc[k]
+
+                last_bear_bar = k
+
+
+        smc_buy4 = False
+        smc_sell4 = False
+
+
+        # ================= RULE-4 ALIGNMENT =================
+
+        if last_bear_bar is not None:
+
+            if len(df) - last_bear_bar <= BOX_AGE_LIMIT:
+
+                prev_exit = df.High.iloc[-2] < last_bear_fvg_bot
+
+                prev_bearish = df.Close.iloc[-2] < df.Open.iloc[-2]
+
+                curr_bullish = df.Close.iloc[-1] > df.Open.iloc[-1]
+
+                smc_buy4 = prev_exit and prev_bearish and curr_bullish
+
+
+        if last_bull_bar is not None:
+
+            if len(df) - last_bull_bar <= BOX_AGE_LIMIT:
+
+                prev_exit = df.Low.iloc[-2] > last_bull_fvg_top
+
+                prev_bullish = df.Close.iloc[-2] > df.Open.iloc[-2]
+
+                curr_bearish = df.Close.iloc[-1] < df.Open.iloc[-1]
+
+                smc_sell4 = prev_exit and prev_bullish and curr_bearish
+
+
+        # ================= FINAL SIGNAL =================
+
+        buy_signal = smc_buy4 or ha_buy
+
+        sell_signal = smc_sell4 or ha_sell
+
+
+        if DEBUG_MODE:
+
+            st.write(symbol)
+
+            st.write("ATR%", round(atr_percent, 2))
+
+            st.write("Hadiff[-1]", Hadiff.iloc[-1])
+
+            st.write("Hadiff[-2]", Hadiff.iloc[-2])
+
+            st.write("Hadiff[-3]", Hadiff.iloc[-3])
+
+            st.write("Hadiff[-4]", Hadiff.iloc[-4])
+
+            st.write("HA BUY", ha_buy)
+
+            st.write("HA SELL", ha_sell)
+
+            st.write("Rule4 BUY", smc_buy4)
+
+            st.write("Rule4 SELL", smc_sell4)
+
+
+        if buy_signal:
+
             ce.append(symbol)
 
-        if ha_sell:
+        elif sell_signal:
+
             pe.append(symbol)
 
+        else:
 
-        progress.progress((i + 1) / len(symbols))
+            neutral.append(symbol)
+
+
+        progress.progress((i + 1) / total)
 
 
     st.success("Scan complete")
 
 
-    st.subheader("CE Candidates")
+    st.subheader("🟢 CE Candidates")
+
     st.write(ce)
 
 
-    st.subheader("PE Candidates")
+    st.subheader("🔴 PE Candidates")
+
     st.write(pe)
+
+
+    st.subheader("⚪ Neutral")
+
+    st.write(neutral)
