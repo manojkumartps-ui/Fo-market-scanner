@@ -5,209 +5,226 @@ import requests
 from transformers import pipeline
 import time
 
-# -------------------------------
-# PAGE CONFIG
-# -------------------------------
+st.set_page_config(page_title="NSE F&O Pro Scanner DEBUG", layout="wide")
 
-st.set_page_config(page_title="Pro NSE F&O Scanner", layout="wide")
-st.title("🏹 NSE F&O Pro Scanner (20D Heikin Ashi)")
+st.title("🏹 NSE F&O Scanner (Instrumented Debug Build)")
 
-# -------------------------------
-# STAGE 0: LOAD FINBERT AI
-# -------------------------------
+DEBUG_MODE = st.sidebar.checkbox("Enable Debug Mode", True)
+
+
+# ================================
+# STAGE 0 — LOAD FINBERT
+# ================================
 
 @st.cache_resource
-def load_pro_ai():
-    try:
-        return pipeline(
-            "sentiment-analysis",
-            model="ProsusAI/finbert"
-        )
-    except:
-        return None
+def load_finbert():
 
-finbert = load_pro_ai()
+    model = pipeline(
+        "sentiment-analysis",
+        model="ProsusAI/finbert"
+    )
 
-# -------------------------------
-# STAGE 1: LEGIT NSE F&O LIST
-# -------------------------------
+    return model
+
+
+finbert = load_finbert()
+
+if DEBUG_MODE:
+    st.sidebar.success("FinBERT loaded successfully")
+
+
+# ================================
+# STAGE 1 — FETCH NSE F&O LIST
+# ================================
 
 @st.cache_data(ttl=86400)
-def get_full_fno_list():
+def get_fno_symbols():
 
-    """
-    Fetch official NSE derivatives underlying securities list
-    Source: NSE derivatives underlying tracker
-    """
+    session = requests.Session()
 
-    try:
+    headers = {
+        "User-Agent":
+        "Mozilla/5.0"
+    }
 
-        url = "https://www.nseindia.com/api/underlying-information"
+    # bootstrap cookie session
+    session.get(
+        "https://www.nseindia.com",
+        headers=headers
+    )
 
-        headers = {
-            "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
+    url = (
+        "https://www.nseindia.com/api/"
+        "equity-stockIndices?index=SECURITIES%20IN%20F%26O"
+    )
 
-        session = requests.Session()
-        session.get(
-            "https://www.nseindia.com",
-            headers=headers
-        )
+    response = session.get(
+        url,
+        headers=headers
+    )
 
-        response = session.get(
-            url,
-            headers=headers
-        )
+    response.raise_for_status()
 
-        data = response.json()
+    json_data = response.json()
 
-        symbols = sorted(
-            [
-                x["symbol"]
-                for x in data["data"]
-                if x["symbol"]
-            ]
-        )
+    symbols = [
+        item["symbol"]
+        for item in json_data["data"]
+    ]
 
-        return [s + ".NS" for s in symbols]
+    return symbols
 
-    except Exception as e:
 
-        st.warning(
-            f"Live NSE F&O fetch failed ({e}). Using fallback basket."
-        )
+symbols = get_fno_symbols()
 
-        return [
-            "RELIANCE.NS",
-            "HDFCBANK.NS",
-            "ICICIBANK.NS",
-            "INFY.NS",
-            "TCS.NS",
-            "SBIN.NS",
-            "AXISBANK.NS",
-            "LT.NS",
-            "MARUTI.NS",
-            "BAJFINANCE.NS"
-        ]
+if DEBUG_MODE:
 
-# -------------------------------
-# STAGE 2: HEIKIN ASHI ENGINE
-# -------------------------------
+    st.sidebar.write(
+        f"Fetched {len(symbols)} F&O symbols"
+    )
 
-def calculate_ha_20d(symbol):
+    st.sidebar.write(
+        "Sample:",
+        symbols[:10]
+    )
 
-    try:
 
-        df = yf.download(
-            symbol,
-            period="1mo",
-            interval="1d",
-            progress=False
-        )
+# ================================
+# STAGE 2 — PRICE DATA VALIDATION
+# ================================
 
-        if df.empty or len(df) < 10:
-            return "NO_DATA", 0, "Price fetch failed"
+def get_price_data(symbol):
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+    df = yf.download(
+        symbol + ".NS",
+        period="1mo",
+        interval="1d",
+        progress=False
+    )
 
-        ha_close = (
-            df["Open"]
-            + df["High"]
-            + df["Low"]
-            + df["Close"]
-        ) / 4
+    if df.empty:
+        raise Exception("Yahoo returned empty dataframe")
 
-        ha_open = [
+    if len(df) < 10:
+        raise Exception("Insufficient candles")
+
+    return df
+
+
+# ================================
+# STAGE 3 — HEIKIN ASHI ENGINE
+# ================================
+
+def calculate_heikin_ashi(df):
+
+    ha_close = (
+        df["Open"]
+        + df["High"]
+        + df["Low"]
+        + df["Close"]
+    ) / 4
+
+    ha_open = [
+        (
+            df["Open"].iloc[0]
+            + df["Close"].iloc[0]
+        ) / 2
+    ]
+
+    for i in range(1, len(df)):
+
+        ha_open.append(
             (
-                df["Open"].iloc[0]
-                + df["Close"].iloc[0]
+                ha_open[i - 1]
+                + ha_close.iloc[i - 1]
             ) / 2
-        ]
-
-        for i in range(1, len(df)):
-
-            ha_open.append(
-                (
-                    ha_open[i - 1]
-                    + ha_close.iloc[i - 1]
-                ) / 2
-            )
-
-        current_open = ha_open[-1]
-        current_close = ha_close.iloc[-1]
-
-        ltp = float(df["Close"].iloc[-1])
-
-        trend = (
-            "Bullish 🟢"
-            if current_close > current_open
-            else "Bearish 🔴"
         )
 
-        return trend, round(ltp, 2), "Success"
+    return ha_open, ha_close
 
-    except Exception as e:
 
-        return "ERROR", 0, str(e)
+# ================================
+# STAGE 4 — TREND DETECTOR
+# ================================
 
-# -------------------------------
-# STAGE 3: FINBERT SENTIMENT
-# -------------------------------
+def get_trend(ha_open, ha_close):
 
-def get_ai_sentiment(symbol):
+    last_open = ha_open[-1]
+    last_close = ha_close.iloc[-1]
 
-    if finbert is None:
-        return 0.0, "AI Not Loaded"
+    if last_close > last_open:
+        return "Bullish 🟢"
 
-    try:
+    return "Bearish 🔴"
 
-        ticker = yf.Ticker(symbol)
 
-        news = ticker.news
+# ================================
+# STAGE 5 — NEWS FETCH VALIDATION
+# ================================
 
-        if not news:
-            return 0.0, "No News Found"
+def fetch_news(symbol):
 
-        titles = [
-            n["title"]
-            for n in news[:5]
-            if "title" in n
-        ]
+    ticker = yf.Ticker(symbol + ".NS")
 
-        if len(titles) == 0:
-            return 0.0, "No Valid Headlines"
+    news = ticker.news
 
-        results = finbert(titles)
+    if news is None:
 
-        mapping = {
-            "positive": 1,
-            "neutral": 0,
-            "negative": -1
-        }
+        return []
 
-        scores = [
-            mapping[r["label"].lower()] * r["score"]
-            for r in results
-        ]
+    titles = []
 
-        avg_score = round(
-            sum(scores) / len(scores),
-            2
+    for n in news:
+
+        if isinstance(n, dict):
+
+            if "title" in n:
+
+                titles.append(n["title"])
+
+    return titles[:5]
+
+
+# ================================
+# STAGE 6 — SENTIMENT SCORING
+# ================================
+
+def score_sentiment(titles):
+
+    if len(titles) == 0:
+
+        return 0.0
+
+    results = finbert(titles)
+
+    mapping = {
+        "positive": 1,
+        "neutral": 0,
+        "negative": -1
+    }
+
+    scores = []
+
+    for r in results:
+
+        weighted_score = (
+            mapping[r["label"].lower()]
+            * r["score"]
         )
 
-        return avg_score, f"{len(titles)} headlines analyzed"
+        scores.append(weighted_score)
 
-    except Exception as e:
+    return round(
+        sum(scores) / len(scores),
+        2
+    )
 
-        return 0.0, str(e)
 
-# -------------------------------
-# STAGE 4: TRADE SIGNAL ENGINE
-# -------------------------------
+# ================================
+# STAGE 7 — TRADE DECISION
+# ================================
 
-def generate_trade_signal(trend, sentiment):
+def trade_signal(trend, sentiment):
 
     if trend == "Bullish 🟢" and sentiment > 0.2:
         return "LONG ✅"
@@ -217,84 +234,97 @@ def generate_trade_signal(trend, sentiment):
 
     return "AVOID ⚠️"
 
-# -------------------------------
-# UI CONTROL PANEL
-# -------------------------------
 
-scan_limit = st.sidebar.slider(
+# ================================
+# UI CONTROL PANEL
+# ================================
+
+scan_depth = st.sidebar.slider(
     "Scan Depth",
     5,
-    100,
-    15
+    150,
+    10
 )
 
-# -------------------------------
+
+# ================================
 # SCANNER ENGINE
-# -------------------------------
+# ================================
 
-if st.button("🚀 Start Market-Wide Scan"):
-
-    symbols = get_full_fno_list()
-
-    targets = symbols[:scan_limit]
+if st.button("🚀 Run Scanner"):
 
     results = []
 
-    for s in targets:
+    for symbol in symbols[:scan_depth]:
 
-        with st.expander(
-            f"Analyzing {s}",
-            expanded=True
-        ):
+        st.write(f"Analyzing {symbol}")
 
-            col1, col2 = st.columns(2)
+        try:
 
-            with col1:
+            df = get_price_data(symbol)
 
-                trend, price, msg1 = calculate_ha_20d(s)
+            if DEBUG_MODE:
 
-                st.success(
-                    f"Trend: {trend} | ₹{price}"
+                st.write(
+                    f"{symbol} candles:",
+                    len(df)
                 )
 
-            with col2:
+            ha_open, ha_close = calculate_heikin_ashi(df)
 
-                sentiment, msg2 = get_ai_sentiment(s)
+            trend = get_trend(
+                ha_open,
+                ha_close
+            )
 
-                st.info(
-                    f"AI Score: {sentiment}"
+            titles = fetch_news(symbol)
+
+            if DEBUG_MODE:
+
+                st.write(
+                    "Headlines:",
+                    titles
                 )
 
-                st.caption(msg2)
+            sentiment = score_sentiment(
+                titles
+            )
 
-            signal = generate_trade_signal(
+            signal = trade_signal(
                 trend,
                 sentiment
             )
 
+            ltp = round(
+                float(df["Close"].iloc[-1]),
+                2
+            )
+
+            st.success(
+                f"{symbol} → {trend} | ₹{ltp} | Sentiment {sentiment}"
+            )
+
             results.append(
                 {
-                    "Stock": s.replace(".NS", ""),
-                    "Price": price,
+                    "Stock": symbol,
+                    "Price": ltp,
                     "Trend": trend,
-                    "AI Score": sentiment,
+                    "Sentiment": sentiment,
                     "Signal": signal
                 }
             )
 
             time.sleep(0.4)
 
-    st.divider()
+        except Exception as e:
 
-    st.subheader(
-        "📊 Consolidated Market Report"
-    )
+            st.error(
+                f"{symbol} failed: {e}"
+            )
+
+    st.divider()
 
     st.dataframe(
         pd.DataFrame(results),
         use_container_width=True
     )
-
-st.caption(
-    "Scanner uses NSE derivatives universe + 20-day Heikin Ashi + FinBERT sentiment."
-)
