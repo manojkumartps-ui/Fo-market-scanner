@@ -3,27 +3,19 @@ import pandas as pd
 import yfinance as yf
 import requests
 from textblob import TextBlob
+import gc
 import time
 
-# ======================================
-# PAGE CONFIG
-# ======================================
+st.set_page_config(page_title="NSE F&O Scanner", layout="wide")
 
-st.set_page_config(
-    page_title="NSE F&O Scanner",
-    layout="wide"
-)
+st.title("🏹 NSE F&O Scanner (Low-Memory Engine)")
 
-st.title("🏹 NSE F&O Scanner (20-Day Heikin Ashi Engine)")
+DEBUG_MODE = st.sidebar.checkbox("Enable Debug Mode", True)
 
-DEBUG_MODE = st.sidebar.checkbox(
-    "Enable Debug Mode",
-    True
-)
 
-# ======================================
-# STAGE 1 — NSE F&O SYMBOL FETCH
-# ======================================
+# ==============================
+# NSE F&O SYMBOL FETCH
+# ==============================
 
 @st.cache_data(ttl=86400)
 def get_fno_symbols():
@@ -53,28 +45,26 @@ def get_fno_symbols():
 
     json_data = response.json()
 
-    symbols = [
+    return [
         item["symbol"]
         for item in json_data["data"]
     ]
-
-    return symbols
 
 
 symbols = get_fno_symbols()
 
 if DEBUG_MODE:
+
     st.sidebar.success(
-        f"{len(symbols)} F&O symbols fetched"
-    )
-    st.sidebar.write(
-        "Sample:",
-        symbols[:10]
+        f"Fetched {len(symbols)} F&O symbols"
     )
 
-# ======================================
-# STAGE 2 — PRICE DATA FETCH
-# ======================================
+    st.sidebar.write(symbols[:10])
+
+
+# ==============================
+# PRICE FETCH
+# ==============================
 
 def fetch_price(symbol):
 
@@ -89,6 +79,7 @@ def fetch_price(symbol):
         raise Exception("Empty dataframe")
 
     if isinstance(df.columns, pd.MultiIndex):
+
         df.columns = df.columns.get_level_values(0)
 
     if len(df) < 10:
@@ -97,11 +88,11 @@ def fetch_price(symbol):
     return df
 
 
-# ======================================
-# STAGE 3 — HEIKIN ASHI ENGINE
-# ======================================
+# ==============================
+# HEIKIN ASHI ENGINE
+# ==============================
 
-def compute_heikin_ashi(df):
+def compute_ha(df):
 
     ha_close = (
         df["Open"]
@@ -126,113 +117,101 @@ def compute_heikin_ashi(df):
             ) / 2
         )
 
-    return ha_open, ha_close
+    return ha_open[-1], ha_close.iloc[-1]
 
 
-# ======================================
-# STAGE 4 — TREND DETECTOR
-# ======================================
+# ==============================
+# NEWS SENTIMENT
+# ==============================
 
-def detect_trend(ha_open, ha_close):
-
-    last_open = float(ha_open[-1])
-    last_close = float(ha_close.iloc[-1])
-
-    if last_close > last_open:
-        return "Bullish 🟢"
-
-    return "Bearish 🔴"
-
-
-# ======================================
-# STAGE 5 — NEWS FETCH
-# ======================================
-
-def fetch_news(symbol):
+def sentiment(symbol):
 
     ticker = yf.Ticker(symbol + ".NS")
 
     news = ticker.news
 
-    if news is None:
-        return []
+    if not news:
+        return 0.0
 
     titles = []
 
     for n in news:
 
-        if isinstance(n, dict):
+        title = n.get("title")
 
-            title = n.get("title")
-
-            if title:
-                titles.append(title)
+        if title:
+            titles.append(title)
 
         if len(titles) == 5:
             break
 
-    return titles
-
-
-# ======================================
-# STAGE 6 — SENTIMENT ENGINE
-# ======================================
-
-def sentiment_score(titles):
-
-    if len(titles) == 0:
+    if not titles:
         return 0.0
 
     scores = []
 
     for t in titles:
 
-        polarity = TextBlob(t).sentiment.polarity
+        scores.append(
+            TextBlob(t).sentiment.polarity
+        )
 
-        scores.append(polarity)
-
-    return round(
-        sum(scores) / len(scores),
-        2
-    )
+    return round(sum(scores) / len(scores), 2)
 
 
-# ======================================
-# STAGE 7 — TRADE SIGNAL ENGINE
-# ======================================
+# ==============================
+# TREND ENGINE
+# ==============================
 
-def trade_signal(trend, sentiment):
+def trend_engine(open_val, close_val):
+
+    if float(close_val) > float(open_val):
+
+        return "Bullish 🟢"
+
+    return "Bearish 🔴"
+
+
+# ==============================
+# SIGNAL ENGINE
+# ==============================
+
+def signal_engine(trend, sentiment):
 
     if trend == "Bullish 🟢" and sentiment > 0.2:
+
         return "LONG ✅"
 
     if trend == "Bearish 🔴" and sentiment < -0.2:
+
         return "SHORT 🔻"
 
     return "AVOID ⚠️"
 
 
-# ======================================
+# ==============================
 # CONTROL PANEL
-# ======================================
+# ==============================
 
 scan_depth = st.sidebar.slider(
     "Scan Depth",
     5,
-    150,
+    len(symbols),
     10
 )
 
 
-# ======================================
-# SCANNER ENGINE
-# ======================================
+# ==============================
+# SCANNER LOOP (STREAM SAFE)
+# ==============================
 
 if st.button("🚀 Run Scanner"):
 
     results = []
 
-    for symbol in symbols[:scan_depth]:
+    progress = st.progress(0)
+
+    for i, symbol in enumerate(symbols[:scan_depth]):
 
         st.write(f"Analyzing {symbol}")
 
@@ -240,34 +219,18 @@ if st.button("🚀 Run Scanner"):
 
             df = fetch_price(symbol)
 
-            if DEBUG_MODE:
-                st.write(
-                    "Candles:",
-                    len(df)
-                )
+            open_val, close_val = compute_ha(df)
 
-            ha_open, ha_close = compute_heikin_ashi(df)
-
-            trend = detect_trend(
-                ha_open,
-                ha_close
+            trend = trend_engine(
+                open_val,
+                close_val
             )
 
-            titles = fetch_news(symbol)
+            sent = sentiment(symbol)
 
-            if DEBUG_MODE:
-                st.write(
-                    "Headlines:",
-                    titles
-                )
-
-            sentiment = sentiment_score(
-                titles
-            )
-
-            signal = trade_signal(
+            signal = signal_engine(
                 trend,
-                sentiment
+                sent
             )
 
             ltp = round(
@@ -276,7 +239,7 @@ if st.button("🚀 Run Scanner"):
             )
 
             st.success(
-                f"{symbol} → {trend} | ₹{ltp} | Sentiment {sentiment}"
+                f"{symbol} → {trend} | ₹{ltp} | Sentiment {sent}"
             )
 
             results.append(
@@ -284,12 +247,13 @@ if st.button("🚀 Run Scanner"):
                     "Stock": symbol,
                     "Price": ltp,
                     "Trend": trend,
-                    "Sentiment": sentiment,
+                    "Sentiment": sent,
                     "Signal": signal
                 }
             )
 
-            time.sleep(0.3)
+            del df
+            gc.collect()
 
         except Exception as e:
 
@@ -297,17 +261,13 @@ if st.button("🚀 Run Scanner"):
                 f"{symbol} failed → {e}"
             )
 
-    st.divider()
+        progress.progress((i + 1) / scan_depth)
 
-    st.subheader(
-        "📊 Consolidated Market Report"
-    )
+        time.sleep(0.15)
+
+    st.divider()
 
     st.dataframe(
         pd.DataFrame(results),
         use_container_width=True
     )
-
-st.caption(
-    "Universe: Official NSE Securities in F&O | Engine: 20-Day Heikin Ashi + News Sentiment"
-)
