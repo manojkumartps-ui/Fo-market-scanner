@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import time
 
 st.set_page_config(layout="wide")
 
@@ -9,7 +10,7 @@ st.title("🏹 NSE F&O Smoothed HA + SMC Scanner")
 
 
 # =============================
-# PARAMETERS (FROM YOUR STRATEGY)
+# PARAMETERS
 # =============================
 
 SWING_LEN = 5
@@ -20,7 +21,7 @@ LEN2 = 3
 
 
 # =============================
-# FETCH LIVE NSE F&O LIST
+# FETCH NSE F&O SYMBOLS
 # =============================
 
 @st.cache_data(ttl=86400)
@@ -30,18 +31,17 @@ def fetch_fno_symbols():
 
     df = pd.read_csv(url)
 
-    symbols = df["SYMBOL"].dropna().unique()
-
-    return sorted(symbols)
+    return sorted(df["SYMBOL"].dropna().unique())
 
 
-symbols = fetch_fno_symbols()
+with st.spinner("Fetching NSE F&O universe..."):
+    symbols = fetch_fno_symbols()
 
-st.write(f"Fetched {len(symbols)} F&O symbols")
+st.success(f"{len(symbols)} F&O stocks loaded")
 
 
 # =============================
-# DATA DOWNLOAD
+# DOWNLOAD DATA
 # =============================
 
 @st.cache_data
@@ -54,25 +54,25 @@ def download_data(symbols):
         period="3mo",
         interval="1d",
         group_by="ticker",
-        progress=False
+        progress=False,
+        threads=True
     )
 
 
-data = download_data(symbols)
+with st.spinner("Downloading OHLC batch data..."):
+    data = download_data(symbols)
+
+st.success("Market data ready")
 
 
 # =============================
-# EMA FUNCTION
+# HELPERS
 # =============================
 
 def ema(series, length):
 
     return series.ewm(span=length, adjust=False).mean()
 
-
-# =============================
-# ATR %
-# =============================
 
 def atr_percent(df):
 
@@ -86,10 +86,6 @@ def atr_percent(df):
 
     return (atr / df.Close) * 100
 
-
-# =============================
-# PIVOT DETECTION (LIKE PINE)
-# =============================
 
 def pivot_high(series, length):
 
@@ -110,172 +106,159 @@ def pivot_low(series, length):
 
 
 # =============================
-# SCANNER ENGINE
+# SCAN BUTTON
 # =============================
 
-ce_candidates = []
-pe_candidates = []
-neutral = []
+if st.button("🚀 Start Scan"):
 
+    progress = st.progress(0)
+    status = st.empty()
 
-for stock in symbols:
+    ce_candidates = []
+    pe_candidates = []
+    neutral = []
 
-    if stock + ".NS" not in data:
+    total = len(symbols)
 
-        continue
 
+    for i, stock in enumerate(symbols):
 
-    st.write(f"Analyzing {stock}")
+        status.text(f"Scanning {stock} ({i+1}/{total})")
 
-    df = data[stock + ".NS"].dropna()
+        ticker = stock + ".NS"
 
-    if len(df) < 40:
+        if ticker not in data:
 
-        continue
+            continue
 
 
-    # =============================
-    # ATR FILTER
-    # =============================
+        df = data[ticker].dropna()
 
-    df["ATR%"] = atr_percent(df)
+        if len(df) < 40:
 
-    atr_last = df["ATR%"].iloc[-1]
+            continue
 
-    st.write("ATR%:", round(atr_last,2))
 
-    if atr_last < ATR_THRESHOLD:
+        # ATR FILTER
 
-        neutral.append(stock)
+        df["ATR%"] = atr_percent(df)
 
-        continue
+        if df["ATR%"].iloc[-1] < ATR_THRESHOLD:
 
+            neutral.append(stock)
 
-    # =============================
-    # SMOOTHED HA
-    # =============================
+            continue
 
-    sOpen = ema(df.Open, LEN1)
-    sClose = ema(df.Close, LEN1)
-    sHigh = ema(df.High, LEN1)
-    sLow = ema(df.Low, LEN1)
 
-    ha_close = (sOpen + sHigh + sLow + sClose)/4
+        # SMOOTHED HA
 
-    ha_open = ha_close.copy()
+        sOpen = ema(df.Open, LEN1)
+        sClose = ema(df.Close, LEN1)
+        sHigh = ema(df.High, LEN1)
+        sLow = ema(df.Low, LEN1)
 
-    ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0])/2
+        ha_close = (sOpen + sHigh + sLow + sClose) / 4
 
-    for i in range(1,len(df)):
+        ha_open = ha_close.copy()
 
-        ha_open.iloc[i] = (
-            ha_open.iloc[i-1]
-            +
-            ha_close.iloc[i-1]
-        ) / 2
+        ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0]) / 2
 
 
-    o2 = ema(ha_open, LEN2)
-    c2 = ema(ha_close, LEN2)
+        for j in range(1, len(df)):
 
-    Hadiff = o2 - c2
+            ha_open.iloc[j] = (
+                ha_open.iloc[j - 1]
+                + ha_close.iloc[j - 1]
+            ) / 2
 
 
-    ha_buy = (
+        o2 = ema(ha_open, LEN2)
+        c2 = ema(ha_close, LEN2)
 
-        (df.Close.iloc[-1] > df.Open.iloc[-1])
+        Hadiff = o2 - c2
 
-        and
 
-        (Hadiff.iloc[-1] < 0)
+        ha_buy = (
 
-        and
+            df.Close.iloc[-1] > df.Open.iloc[-1]
 
-        (Hadiff.iloc[-4] > 0)
+            and Hadiff.iloc[-1] < 0
 
-        and
+            and Hadiff.iloc[-4] > 0
 
-        (df.Close.iloc[-1] > c2.iloc[-1])
+            and df.Close.iloc[-1] > c2.iloc[-1]
 
-    )
+        )
 
 
-    ha_sell = (
+        ha_sell = (
 
-        (df.Close.iloc[-1] < df.Open.iloc[-1])
+            df.Close.iloc[-1] < df.Open.iloc[-1]
 
-        and
+            and Hadiff.iloc[-1] > 0
 
-        (Hadiff.iloc[-1] > 0)
+            and Hadiff.iloc[-4] < 0
 
-        and
+            and df.Close.iloc[-1] < c2.iloc[-1]
 
-        (Hadiff.iloc[-4] < 0)
+        )
 
-        and
 
-        (df.Close.iloc[-1] < c2.iloc[-1])
+        ph = pivot_high(df.High, SWING_LEN)
+        pl = pivot_low(df.Low, SWING_LEN)
 
-    )
 
+        lastH = ph.dropna().iloc[-1] if ph.dropna().size else np.nan
+        lastL = pl.dropna().iloc[-1] if pl.dropna().size else np.nan
 
-    # =============================
-    # STRUCTURE BREAK
-    # =============================
 
-    ph = pivot_high(df.High, SWING_LEN)
-    pl = pivot_low(df.Low, SWING_LEN)
+        bull_break = False
+        bear_break = False
 
-    lastH = ph.dropna().iloc[-1] if ph.dropna().size else np.nan
-    lastL = pl.dropna().iloc[-1] if pl.dropna().size else np.nan
 
+        if not np.isnan(lastH):
 
-    bull_break = False
-    bear_break = False
+            bull_break = df.Close.iloc[-1] > lastH
 
 
-    if not np.isnan(lastH):
+        if not np.isnan(lastL):
 
-        bull_break = df.Close.iloc[-1] > lastH
+            bear_break = df.Close.iloc[-1] < lastL
 
 
-    if not np.isnan(lastL):
+        buy_signal = bull_break or ha_buy
+        sell_signal = bear_break or ha_sell
 
-        bear_break = df.Close.iloc[-1] < lastL
 
+        if buy_signal:
 
-    buy_signal = bull_break or ha_buy
-    sell_signal = bear_break or ha_sell
+            ce_candidates.append(stock)
 
+        elif sell_signal:
 
-    if buy_signal:
+            pe_candidates.append(stock)
 
-        ce_candidates.append(stock)
+        else:
 
-        st.success("BUY → CE candidate")
+            neutral.append(stock)
 
 
-    elif sell_signal:
+        progress.progress((i + 1) / total)
 
-        pe_candidates.append(stock)
 
-        st.error("SELL → PE candidate")
+    status.text("Scan complete")
 
 
-    else:
+    st.subheader("🟢 CE Candidates")
 
-        neutral.append(stock)
+    st.write(ce_candidates)
 
 
-# =============================
-# FINAL OUTPUT
-# =============================
+    st.subheader("🔴 PE Candidates")
 
-st.subheader("🟢 CE Candidates")
-st.write(ce_candidates)
+    st.write(pe_candidates)
 
-st.subheader("🔴 PE Candidates")
-st.write(pe_candidates)
 
-st.subheader("⚪ Neutral")
-st.write(neutral)
+    st.subheader("⚪ Neutral")
+
+    st.write(neutral)
