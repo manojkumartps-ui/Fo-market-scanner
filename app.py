@@ -1,35 +1,38 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import requests
 import time
 
-st.set_page_config(
-    page_title="NSE F&O Scanner",
-    layout="wide"
-)
+st.set_page_config(page_title="SMC + Smoothed HA Scanner", layout="wide")
 
-st.title("🏹 NSE F&O Scanner (20-Day Heikin Ashi Regime Engine)")
+st.title("🏹 NSE F&O SMC + Smoothed HA Scanner")
 
 
-# ===============================
-# STAGE 1 — FETCH NSE F&O LIST
-# ===============================
+# ================= PARAMETERS =================
+
+SWING_LEN = 5
+ATR_LEN = 3
+ATR_FILTER = 2
+GAP_THRESHOLD = 0.5
+BOX_AGE_LIMIT = 15
+IMPULSE_MULTIPLIER = 1.2
+
+HA_LEN1 = 5
+HA_LEN2 = 3
+
+
+# ================= NSE F&O LIST =================
 
 @st.cache_data(ttl=86400)
 def get_fno_symbols():
 
     session = requests.Session()
 
-    headers = {
-        "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    session.get(
-        "https://www.nseindia.com",
-        headers=headers
-    )
+    session.get("https://www.nseindia.com", headers=headers)
 
     url = (
         "https://www.nseindia.com/api/"
@@ -37,217 +40,196 @@ def get_fno_symbols():
         "index=SECURITIES%20IN%20F%26O"
     )
 
-    response = session.get(
-        url,
-        headers=headers
-    )
+    data = session.get(url, headers=headers).json()["data"]
 
-    response.raise_for_status()
-
-    data = response.json()["data"]
-
-    symbols = [
-        item["symbol"]
-        for item in data
-    ]
-
-    return symbols
+    return [x["symbol"] for x in data]
 
 
 symbols = get_fno_symbols()
 
-st.sidebar.success(
-    f"{len(symbols)} F&O symbols loaded"
-)
+st.sidebar.success(f"{len(symbols)} F&O symbols loaded")
 
 
-# ===============================
-# STAGE 2 — BATCH PRICE DOWNLOAD
-# ===============================
+# ================= ATR =================
 
-def batch_download(symbols):
+def ATR(df, length):
 
-    ticker_string = " ".join(
-        [s + ".NS" for s in symbols]
+    hl = df.High - df.Low
+    hc = abs(df.High - df.Close.shift())
+    lc = abs(df.Low - df.Close.shift())
+
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+
+    return tr.rolling(length).mean()
+
+
+# ================= STRUCTURE =================
+
+def detect_structure(df):
+
+    ph = df.High.rolling(SWING_LEN * 2 + 1, center=True).max()
+    pl = df.Low.rolling(SWING_LEN * 2 + 1, center=True).min()
+
+    lastH = ph.iloc[-SWING_LEN]
+    lastL = pl.iloc[-SWING_LEN]
+
+    bull_break = df.Close.iloc[-1] > lastH
+    bear_break = df.Close.iloc[-1] < lastL
+
+    return bull_break, bear_break, lastH, lastL
+
+
+# ================= SMOOTHED HA =================
+
+def smoothed_ha(df):
+
+    sOpen = df.Open.ewm(span=HA_LEN1).mean()
+    sClose = df.Close.ewm(span=HA_LEN1).mean()
+    sHigh = df.High.ewm(span=HA_LEN1).mean()
+    sLow = df.Low.ewm(span=HA_LEN1).mean()
+
+    ha_close = (sOpen + sHigh + sLow + sClose) / 4
+
+    ha_open = [(sOpen.iloc[0] + sClose.iloc[0]) / 2]
+
+    for i in range(1, len(df)):
+        ha_open.append((ha_open[i-1] + ha_close.iloc[i-1]) / 2)
+
+    ha_open = pd.Series(ha_open, index=df.index)
+
+    o2 = ha_open.ewm(span=HA_LEN2).mean()
+    c2 = ha_close.ewm(span=HA_LEN2).mean()
+
+    return o2, c2
+
+
+# ================= FVG =================
+
+def detect_fvg(df, atr):
+
+    impulse = (df.High - df.Low) > atr * IMPULSE_MULTIPLIER
+
+    bull_gap = (
+        (df.Low > df.High.shift(2))
+        &
+        ((df.Low - df.High.shift(2)) > atr * GAP_THRESHOLD)
+        &
+        impulse.shift(1)
     )
 
-    df = yf.download(
-        ticker_string,
-        period="1mo",
+    bear_gap = (
+        (df.High < df.Low.shift(2))
+        &
+        ((df.Low.shift(2) - df.High) > atr * GAP_THRESHOLD)
+        &
+        impulse.shift(1)
+    )
+
+    return bull_gap, bear_gap
+
+
+# ================= RULE 4 LOGIC =================
+
+def fvg_retest(df, bull_gap, bear_gap):
+
+    recent_bull = bull_gap.iloc[-BOX_AGE_LIMIT:]
+    recent_bear = bear_gap.iloc[-BOX_AGE_LIMIT:]
+
+    bull_retest = recent_bull.any() and df.Low.iloc[-1] <= df.Low.iloc[-3]
+
+    bear_retest = recent_bear.any() and df.High.iloc[-1] >= df.High.iloc[-3]
+
+    return bull_retest, bear_retest
+
+
+# ================= SIGNAL ENGINE =================
+
+def generate_signal(df):
+
+    atr = ATR(df, ATR_LEN)
+
+    atr_pct = atr.iloc[-1] / df.Close.iloc[-1] * 100
+
+    st.write("ATR%:", round(atr_pct, 2))
+
+    if atr_pct < ATR_FILTER:
+
+        return "NO SIGNAL", "LOW VOLATILITY"
+
+
+    o2, c2 = smoothed_ha(df)
+
+    hadiff = o2 - c2
+
+
+    ha_buy = (hadiff.iloc[-1] < 0) and (hadiff.iloc[-2] > 0)
+
+    ha_sell = (hadiff.iloc[-1] > 0) and (hadiff.iloc[-2] < 0)
+
+
+    bull_break, bear_break, lastH, lastL = detect_structure(df)
+
+    st.write("Structure High:", lastH)
+    st.write("Structure Low:", lastL)
+
+
+    bull_gap, bear_gap = detect_fvg(df, atr)
+
+    bull_retest, bear_retest = fvg_retest(df, bull_gap, bear_gap)
+
+
+    smc_buy = bull_retest and bull_break
+
+    smc_sell = bear_retest and bear_break
+
+
+    if smc_buy and ha_buy:
+
+        return "BUY", "SMC + HA CONFIRMED"
+
+
+    if smc_sell and ha_sell:
+
+        return "SELL", "SMC + HA CONFIRMED"
+
+
+    return "NO SIGNAL", "NO ALIGNMENT"
+
+
+# ================= DOWNLOAD =================
+
+def download_batch(symbols):
+
+    tickers = " ".join([s + ".NS" for s in symbols])
+
+    return yf.download(
+        tickers,
+        period="3mo",
         interval="1d",
         group_by="ticker",
-        threads=True,
         progress=False
     )
 
-    return df
 
-
-# ===============================
-# STAGE 3 — HEIKIN ASHI ENGINE
-# TRUE 20-DAY REGIME VERSION
-# ===============================
-
-def compute_ha_regime(df_symbol, symbol):
-
-    if df_symbol.empty:
-
-        st.error(f"{symbol} no OHLC data")
-
-        return None
-
-
-    candle_count = len(df_symbol)
-
-    st.write(f"{symbol} candles fetched:", candle_count)
-
-
-    if candle_count < 20:
-
-        st.warning(f"{symbol} insufficient candles")
-
-        return None
-
-
-    ha_close = (
-        df_symbol["Open"]
-        + df_symbol["High"]
-        + df_symbol["Low"]
-        + df_symbol["Close"]
-    ) / 4
-
-
-    ha_open = [
-        (
-            df_symbol["Open"].iloc[0]
-            + df_symbol["Close"].iloc[0]
-        ) / 2
-    ]
-
-
-    for i in range(1, len(df_symbol)):
-
-        ha_open.append(
-            (
-                ha_open[i - 1]
-                + ha_close.iloc[i - 1]
-            ) / 2
-        )
-
-
-    ha_open = pd.Series(
-        ha_open,
-        index=df_symbol.index
-    )
-
-
-    last20_open = ha_open.iloc[-20:]
-    last20_close = ha_close.iloc[-20:]
-
-
-    bullish_count = (
-        last20_close > last20_open
-    ).sum()
-
-
-    bearish_count = 20 - bullish_count
-
-
-    body_strength = (
-        last20_close - last20_open
-    ).mean()
-
-
-    last_open = float(last20_open.iloc[-1])
-    last_close = float(last20_close.iloc[-1])
-
-
-    if bullish_count >= 14:
-
-        regime = "Bullish 🟢"
-
-    elif bearish_count >= 14:
-
-        regime = "Bearish 🔴"
-
-    else:
-
-        regime = "Sideways ⚪"
-
-
-    ltp = round(
-        float(df_symbol["Close"].iloc[-1]),
-        2
-    )
-
-
-    st.write(
-        f"{symbol} bullish candles:",
-        bullish_count
-    )
-
-    st.write(
-        f"{symbol} bearish candles:",
-        bearish_count
-    )
-
-    st.write(
-        f"{symbol} avg body strength:",
-        round(body_strength, 3)
-    )
-
-    st.write(
-        f"{symbol} last HA candle:",
-        "Bullish"
-        if last_close > last_open
-        else "Bearish"
-    )
-
-
-    return {
-
-        "Stock": symbol,
-
-        "Price": ltp,
-
-        "Trend": regime,
-
-        "BullishCount": bullish_count,
-
-        "BearishCount": bearish_count,
-
-        "BodyStrength": round(body_strength, 3)
-
-    }
-
-
-# ===============================
-# UI CONTROL PANEL
-# ===============================
+# ================= UI =================
 
 scan_depth = st.sidebar.slider(
-
     "Scan Depth",
-
     5,
-
     len(symbols),
-
     15
 )
 
 
-# ===============================
-# SCANNER ENGINE
-# ===============================
+# ================= SCANNER =================
 
-if st.button("🚀 Run Market Scan"):
+if st.button("🚀 Run Scan"):
 
     selected = symbols[:scan_depth]
 
-    st.info("Downloading OHLC batch...")
+    st.info("Downloading OHLC...")
 
-    price_data = batch_download(selected)
+    price_data = download_batch(selected)
 
     results = []
 
@@ -260,62 +242,42 @@ if st.button("🚀 Run Market Scan"):
 
         try:
 
-            df_symbol = price_data[
-                symbol + ".NS"
-            ]
+            df = price_data[symbol + ".NS"]
 
-            output = compute_ha_regime(
+            signal, reason = generate_signal(df)
 
-                df_symbol,
+            price = round(df.Close.iloc[-1], 2)
 
-                symbol
+            st.write("Signal:", signal)
 
-            )
+            st.caption(reason)
 
-            if output:
 
-                results.append(output)
+            results.append({
+
+                "Stock": symbol,
+                "Price": price,
+                "Signal": signal,
+                "Reason": reason
+
+            })
+
 
         except Exception as e:
 
-            st.error(
-
-                f"{symbol} failed → {e}"
-
-            )
+            st.error(f"{symbol} failed → {e}")
 
 
-        progress.progress(
-
-            (i + 1) / scan_depth
-
-        )
-
+        progress.progress((i + 1) / scan_depth)
 
         time.sleep(0.05)
 
 
     st.divider()
 
+    st.subheader("📊 Consolidated Report")
 
-    st.subheader(
-
-        "📊 Consolidated Market Report"
-
-    )
+    st.dataframe(pd.DataFrame(results), use_container_width=True)
 
 
-    st.dataframe(
-
-        pd.DataFrame(results),
-
-        use_container_width=True
-
-    )
-
-
-st.caption(
-
-    "Universe: Official NSE F&O list | Engine: True 20-Day Heikin Ashi Regime Logic"
-
-)
+st.caption("Engine: Corrected SMC + Smoothed HA + ATR Expansion Strategy")
