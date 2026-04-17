@@ -1,101 +1,135 @@
 import streamlit as st
 import pandas as pd
+import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import nltk
+import time
 
-# Setup Sentiment
+# --- INITIALIZATION ---
 @st.cache_resource
-def load_sia():
+def setup_nlp():
     nltk.download('vader_lexicon', quiet=True)
     return SentimentIntensityAnalyzer()
 
-sia = load_sia()
+sia = setup_nlp()
 
-# 1. LOGIC: Reliable F&O List Building
+# --- LOGIC 1: BUILD F&O LIST ---
 @st.cache_data(ttl=3600)
 def get_fno_list():
+    """Fetches the live list of NSE F&O stocks from public feeds."""
     try:
-        # Fetch Zerodha instrument dump
-        url = "https://api.kite.trade/instruments"
+        url = "https://kite.trade"
         df = pd.read_csv(url)
-        # Filter for NFO segment - 'name' column contains the clean stock symbol
+        # NFO segment filter isolates derivatives
         fno_df = df[df['exchange'] == 'NFO']
-        # Remove indices like NIFTY/BANKNIFTY if you only want stocks
-        fno_stocks = fno_df['name'].unique().tolist()
-        return sorted([str(x) for x in fno_stocks if str(x) != 'nan'])
-    except:
-        # Hardcoded fallback of top 10 F&O stocks
-        return ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "SBIN", "BHARTIARTL", "AXISBANK", "LT", "ITC"]
+        symbols = sorted(fno_df['name'].unique().tolist())
+        return [str(s) for s in symbols if str(s) != 'nan']
+    except Exception as e:
+        st.error(f"List building failed: {e}")
+        return ["RELIANCE", "TCS", "HDFCBANK", "INFY", "SBIN", "ICICIBANK"]
 
-# 2. LOGIC: India-Specific Sentiment Scoring
-def get_indian_sentiment(ticker):
+# --- LOGIC 2: HEIKIN ASHI TREND ---
+def calculate_ha_trend(symbol):
+    """Fetches OHLC and returns a Heikin Ashi trend score."""
     try:
-        # Search Google News for Indian context (Ticker + "stock news")
-        search_url = f"https://google.com{ticker}+share+news&tbm=nws"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(search_url, headers=headers, timeout=5)
-        soup = BeautifulSoup(response.content, 'html.parser')
+        ticker = f"{symbol}.NS"
+        data = yf.download(ticker, period="5d", interval="1d", progress=False)
+        if data.empty: return "NO_DATA", 0
         
-        # Extract headlines
-        headlines = [g.text for g in soup.find_all('div', {'role': 'heading'})]
-        if not headlines: return 0.0
+        # Latest bar
+        last = data.iloc[-1]
+        prev = data.iloc[-2]
         
-        scores = [sia.polarity_scores(h)['compound'] for h in headlines[:10]]
-        return round(sum(scores) / len(scores), 2)
+        # HA Close = (O+H+L+C)/4
+        ha_close = (last['Open'] + last['High'] + last['Low'] + last['Close']) / 4
+        # HA Open = (Prev_HA_Open + Prev_HA_Close)/2
+        ha_open = (prev['Open'] + prev['Close']) / 2
+        
+        trend = "Bullish 🟢" if ha_close > ha_open else "Bearish 🔴"
+        return trend, round(float(last['Close']), 2)
     except:
-        return 0.0
+        return "ERROR", 0
 
-# 3. LOGIC: Heikin Ashi Trend Scoring
-def get_ha_trend_score(score):
-    # Logic: High positive sentiment + price strength = Strong Bullish
-    if score > 0.2: return "Strong Bullish 🚀"
-    if score > 0.05: return "Bullish 🟢"
-    if score < -0.2: return "Strong Bearish 📉"
-    if score < -0.05: return "Bearish 🔴"
-    return "Neutral ⚪"
+# --- LOGIC 3: MULTI-FEED SENTIMENT ---
+def get_crowd_sentiment(symbol):
+    """Combines StockTwits retail bias and News headlines."""
+    score = 0.0
+    sources = []
+    
+    # Source A: StockTwits Cashtag (Direct Retail Sentiment)
+    try:
+        st_url = f"https://stocktwits.com{symbol}.json"
+        res = requests.get(st_url, timeout=3).json()
+        msgs = res.get('messages', [])
+        if msgs:
+            tags = [m['entities'].get('sentiment', {}).get('basic') for m in msgs]
+            bull = tags.count('Bullish')
+            bear = tags.count('Bearish')
+            if (bull + bear) > 0:
+                score += (bull - bear) / (bull + bear)
+                sources.append(f"StockTwits (Bull:{bull}|Bear:{bear})")
+    except: pass
 
-# --- UI ---
-st.set_page_config(page_title="NSE F&O Market Scanner", layout="wide")
-st.title("🚀 NSE F&O Market Scanner")
-st.sidebar.header("Scan Settings")
-scan_limit = st.sidebar.slider("Number of Stocks", 5, 100, 20)
+    # Source B: News Feed
+    try:
+        ticker = yf.Ticker(f"{symbol}.NS")
+        news = ticker.news[:3]
+        if news:
+            news_scores = [sia.polarity_scores(n['title'])['compound'] for n in news]
+            score += sum(news_scores) / len(news_scores)
+            sources.append("Yahoo Finance News")
+    except: pass
 
-if st.button("Start Full Market Scan"):
+    final_score = round(score / (len(sources) if sources else 1), 2)
+    return final_score, " | ".join(sources) if sources else "No Crowd Data"
+
+# --- UI & DEBUGGING STAGES ---
+st.set_page_config(page_title="NSE F&O Debug Scanner", layout="wide")
+st.title("🛡️ NSE F&O Scanner (Debug Mode)")
+
+# Sidebar config
+limit = st.sidebar.slider("Scan Count", 5, 50, 10)
+
+if st.button("🚀 Start Live Debug Scan"):
     fno_list = get_fno_list()
-    targets = fno_list[:scan_limit]
+    targets = fno_list[:limit]
     
-    results = []
-    progress = st.progress(0)
+    scan_results = []
     
-    for i, s in enumerate(targets):
-        score = get_indian_sentiment(s)
-        trend = get_ha_trend_score(score)
-        results.append({
-            "Symbol": s, 
-            "Sentiment Score": score, 
-            "HA Trend": trend
-        })
-        progress.progress((i + 1) / len(targets))
+    for s in targets:
+        # VISUAL DEBUGGING BLOCKS
+        with st.expander(f"🔍 Analyzing: {s}", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            # Stage 1: HA Trend
+            with col1:
+                st.write("**Stage 1: Heikin Ashi Logic**")
+                trend, price = calculate_ha_trend(s)
+                if trend != "ERROR":
+                    st.success(f"Trend: {trend} | Price: ₹{price}")
+                else:
+                    st.error("Price fetch failed.")
+            
+            # Stage 2: Sentiment
+            with col2:
+                st.write("**Stage 2: Crowd Scoring**")
+                sent_score, meta = get_crowd_sentiment(s)
+                st.info(f"Score: {sent_score}")
+                st.caption(f"Sources: {meta}")
+            
+            scan_results.append({
+                "Symbol": s,
+                "Price": price,
+                "HA Trend": trend,
+                "Crowd Score": sent_score,
+                "Sources": meta
+            })
+            time.sleep(0.5) # Avoid API rate limits
 
-    df = pd.DataFrame(results)
-    
-    # Dashboard Metrics
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Scanned", len(df))
-    m2.metric("Bullish Sentiment", len(df[df['Sentiment Score'] > 0.05]))
-    m3.metric("Bearish Sentiment", len(df[df['Sentiment Score'] < -0.05]))
-
-    # Display results with column formatting
-    st.dataframe(
-        df,
-        column_config={
-            "Sentiment Score": st.column_config.ProgressColumn(
-                "Score Intensity", help="Sentiment from -1 to 1", min_value=-1, max_value=1
-            )
-        },
-        use_container_width=True
-    )
-
-st.caption("Data sources: Zerodha (Instruments) and Google News (Sentiment).")
+    # FINAL CONSOLIDATED OUTPUT
+    st.divider()
+    st.subheader("📊 Final Market Dashboard")
+    df = pd.DataFrame(scan_results)
+    st.dataframe(df, use_container_width=True)
