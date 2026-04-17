@@ -5,80 +5,40 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("📊 NSE F&O SMC + Smoothed HA Scanner")
+st.title("SMC + Smoothed HA Scanner (TradingView-Parity Version)")
 
-# ================= PARAMETERS =================
 
-SWING_LEN = 5
-ATR_LEN = 3
-ATR_THRESHOLD = 3.5
-GAP_MULT = 0.5
-BOX_AGE_LIMIT = 15
+# ================= SETTINGS =================
 
 LEN1 = 5
 LEN2 = 3
 
-DEBUG_MODE = st.checkbox("Enable Debug Mode")
+ATR_LEN = 3
+ATR_THRESHOLD = 3.5
 
-# ================= FETCH F&O SYMBOLS =================
-
-@st.cache_data(ttl=86400)
-def fetch_symbols():
-
-    session = requests.Session()
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    session.get("https://www.nseindia.com", headers=headers)
-
-    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
-
-    response = session.get(url, headers=headers)
-
-    data = response.json()
-
-    symbols = []
-
-    for item in data["data"]:
-        symbols.append(item["metadata"]["symbol"])
-
-    return sorted(list(set(symbols)))
+GAP_MULT = 0.5
+BOX_AGE_LIMIT = 15
 
 
-symbols = fetch_symbols()
+# ================= TRUE TV EMA =================
 
-st.success(f"{len(symbols)} symbols loaded")
+def tv_ema(series, length):
 
+    alpha = 2 / (length + 1)
 
-# ================= DOWNLOAD DATA =================
+    ema = series.copy()
 
-@st.cache_data
-def load_data(symbols):
+    for i in range(1, len(series)):
 
-    tickers = [s + ".NS" for s in symbols]
+        ema.iloc[i] = (
+            alpha * series.iloc[i]
+            + (1 - alpha) * ema.iloc[i - 1]
+        )
 
-    return yf.download(
-        tickers=tickers,
-        period="6mo",
-        interval="1d",
-        group_by="ticker",
-        threads=True,
-        progress=False
-    )
+    return ema
 
 
-data = load_data(symbols)
-
-st.success("OHLC data ready")
-
-
-# ================= HELPERS =================
-
-def ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
-
+# ================= ATR =================
 
 def atr(df):
 
@@ -91,21 +51,65 @@ def atr(df):
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= SCANNER =================
+# ================= FETCH SYMBOLS =================
 
-if st.button("🚀 RUN SCAN"):
+@st.cache_data(ttl=86400)
+def fetch_symbols():
 
-    progress = st.progress(0)
+    session = requests.Session()
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    session.get("https://www.nseindia.com", headers=headers)
+
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
+
+    data = session.get(url, headers=headers).json()
+
+    return sorted([
+        x["metadata"]["symbol"]
+        for x in data["data"]
+    ])
+
+
+symbols = fetch_symbols()
+
+st.success(f"{len(symbols)} symbols loaded")
+
+
+# ================= DOWNLOAD DATA =================
+
+@st.cache_data
+def load_data(symbols):
+
+    tickers = [x + ".NS" for x in symbols]
+
+    return yf.download(
+        tickers=tickers,
+        period="6mo",
+        interval="1d",
+        group_by="ticker",
+        threads=True
+    )
+
+
+data = load_data(symbols)
+
+st.success("OHLC ready")
+
+
+# ================= RUN SCAN =================
+
+if st.button("RUN SCAN"):
 
     ce = []
     pe = []
-    neutral = []
 
-    total = len(symbols)
+    progress = st.progress(0)
 
-    for i, stock in enumerate(symbols):
+    for i, symbol in enumerate(symbols):
 
-        ticker = stock + ".NS"
+        ticker = symbol + ".NS"
 
         if ticker not in data:
             continue
@@ -119,43 +123,46 @@ if st.button("🚀 RUN SCAN"):
         # ================= ATR FILTER =================
 
         df["ATR"] = atr(df)
+
         df["ATR%"] = df["ATR"] / df.Close * 100
 
-        atr_val = df["ATR%"].iloc[-1]
-
-        if atr_val < ATR_THRESHOLD:
-
-            neutral.append(stock)
+        if df["ATR%"].iloc[-1] < ATR_THRESHOLD:
             continue
 
 
-        # ================= SMOOTHED HA =================
+        # ================= TRUE TV SMOOTHED HA =================
 
-        sOpen = ema(df.Open, LEN1)
-        sClose = ema(df.Close, LEN1)
-        sHigh = ema(df.High, LEN1)
-        sLow = ema(df.Low, LEN1)
+        sOpen = tv_ema(df.Open.copy(), LEN1)
+        sClose = tv_ema(df.Close.copy(), LEN1)
+        sHigh = tv_ema(df.High.copy(), LEN1)
+        sLow = tv_ema(df.Low.copy(), LEN1)
+
 
         ha_close = (sOpen + sHigh + sLow + sClose) / 4
+
 
         ha_open = ha_close.copy()
 
         ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0]) / 2
 
+
         for j in range(1, len(df)):
+
             ha_open.iloc[j] = (
-                ha_open.iloc[j-1]
-                + ha_close.iloc[j-1]
+                ha_open.iloc[j - 1]
+                + ha_close.iloc[j - 1]
             ) / 2
 
 
-        o2 = ema(ha_open, LEN2)
-        c2 = ema(ha_close, LEN2)
+        o2 = tv_ema(ha_open.copy(), LEN2)
+
+        c2 = tv_ema(ha_close.copy(), LEN2)
+
 
         Hadiff = o2 - c2
 
 
-        # ================= TRUE PINE CROSS WINDOW =================
+        # ================= HA SIGNAL =================
 
         ha_buy = (
 
@@ -177,122 +184,22 @@ if st.button("🚀 RUN SCAN"):
         )
 
 
-        ha_buy_prev = (
+        if ha_buy:
+            ce.append(symbol)
 
-            df.Close.iloc[-2] > df.Open.iloc[-2]
-            and Hadiff.iloc[-2] < 0
-            and max(Hadiff.iloc[-5:-2]) > 0
-            and df.Close.iloc[-2] > c2.iloc[-2]
-
-        )
+        if ha_sell:
+            pe.append(symbol)
 
 
-        ha_sell_prev = (
-
-            df.Close.iloc[-2] < df.Open.iloc[-2]
-            and Hadiff.iloc[-2] > 0
-            and min(Hadiff.iloc[-5:-2]) < 0
-            and df.Close.iloc[-2] < c2.iloc[-2]
-
-        )
-
-
-        # ================= FVG DETECTION =================
-
-        last_bull_fvg_top = None
-        last_bull_bar = None
-
-        last_bear_fvg_bot = None
-        last_bear_bar = None
-
-
-        for k in range(2, len(df)):
-
-            gap = df["ATR"].iloc[k] * GAP_MULT
-
-            if df.Low.iloc[k] > df.High.iloc[k-2] + gap:
-
-                last_bull_fvg_top = df.Low.iloc[k]
-                last_bull_bar = k
-
-            if df.High.iloc[k] < df.Low.iloc[k-2] - gap:
-
-                last_bear_fvg_bot = df.High.iloc[k]
-                last_bear_bar = k
-
-
-        smc_buy4 = False
-        smc_sell4 = False
-
-
-        # ================= RULE-4 ALIGNMENT =================
-
-        if last_bear_bar is not None:
-
-            if len(df) - last_bear_bar <= BOX_AGE_LIMIT:
-
-                prev_exit = df.High.iloc[-2] < last_bear_fvg_bot
-
-                prev_bearish = df.Close.iloc[-2] < df.Open.iloc[-2]
-
-                curr_bullish = df.Close.iloc[-1] > df.Open.iloc[-1]
-
-                smc_buy4 = prev_exit and prev_bearish and curr_bullish
-
-
-        if last_bull_bar is not None:
-
-            if len(df) - last_bull_bar <= BOX_AGE_LIMIT:
-
-                prev_exit = df.Low.iloc[-2] > last_bull_fvg_top
-
-                prev_bullish = df.Close.iloc[-2] > df.Open.iloc[-2]
-
-                curr_bearish = df.Close.iloc[-1] < df.Open.iloc[-1]
-
-                smc_sell4 = prev_exit and prev_bullish and curr_bearish
-
-
-        # ================= FINAL SIGNAL =================
-
-        buy_signal = smc_buy4 or (ha_buy and not ha_buy_prev)
-
-        sell_signal = smc_sell4 or (ha_sell and not ha_sell_prev)
-
-
-        if DEBUG_MODE:
-
-            st.write(f"--- {stock} ---")
-            st.write("ATR%", round(atr_val, 2))
-            st.write("HA BUY", ha_buy)
-            st.write("HA SELL", ha_sell)
-            st.write("Rule4 BUY", smc_buy4)
-            st.write("Rule4 SELL", smc_sell4)
-
-
-        if buy_signal:
-            ce.append(stock)
-
-        elif sell_signal:
-            pe.append(stock)
-
-        else:
-            neutral.append(stock)
-
-
-        progress.progress((i + 1) / total)
+        progress.progress((i + 1) / len(symbols))
 
 
     st.success("Scan complete")
 
 
-    st.subheader("🟢 CE Candidates")
+    st.subheader("CE Candidates")
     st.write(ce)
 
 
-    st.subheader("🔴 PE Candidates")
+    st.subheader("PE Candidates")
     st.write(pe)
-
-
-    st.subheader("⚪ Neutral")
-    st.write(neutral)
