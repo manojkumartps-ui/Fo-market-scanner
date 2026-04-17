@@ -5,7 +5,7 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("NSE F&O Strategy Engine (Clean State Machine Build)")
+st.title("NSE F&O Scanner — FINAL TRADINGVIEW PARITY ENGINE")
 
 
 # ================= SETTINGS =================
@@ -18,10 +18,10 @@ ATR_THRESHOLD = 3.5
 DEBUG = st.checkbox("Debug Mode")
 
 
-# ================= F&O SYMBOLS =================
+# ================= F&O LIST =================
 
 @st.cache_data(ttl=86400)
-def get_fno_symbols():
+def get_fno():
 
     session = requests.Session()
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -37,14 +37,14 @@ def get_fno_symbols():
     ))
 
 
-symbols = get_fno_symbols()
-st.success(f"Loaded F&O symbols: {len(symbols)}")
+symbols = get_fno()
+st.success(f"F&O loaded: {len(symbols)}")
 
 
 # ================= DATA =================
 
 @st.cache_data
-def load_data(symbols):
+def load(symbols):
 
     tickers = [s + ".NS" for s in symbols]
 
@@ -58,8 +58,7 @@ def load_data(symbols):
     )
 
 
-data = load_data(symbols)
-st.success("OHLC loaded")
+data = load(symbols)
 
 
 # ================= ATR =================
@@ -87,67 +86,73 @@ def heikin_ashi(df):
     for i in range(1, len(df)):
         ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
 
-    return ha_open, ha_close
+    return pd.Series(ha_open, index=df.index), pd.Series(ha_close, index=df.index)
 
 
-# ================= ENGINE =================
+# ================= PARITY ENGINE =================
 
-def run_strategy(df):
+def engine(df):
 
     df = df.dropna().copy()
     if len(df) < 60:
         return "NONE"
 
 
-    # ATR
     df["ATR"] = atr(df)
 
-
-    # HA
     ha_open, ha_close = heikin_ashi(df)
 
 
-    # Smoothed HA
-    o1 = pd.Series(ha_open).ewm(span=LEN1, adjust=False).mean()
-    c1 = pd.Series(ha_close).ewm(span=LEN1, adjust=False).mean()
+    # ===== Smoothed HA (exact Pine-style EMA series) =====
+
+    o1 = ha_open.ewm(span=LEN1, adjust=False).mean()
+    c1 = ha_close.ewm(span=LEN1, adjust=False).mean()
 
     o2 = o1.ewm(span=LEN2, adjust=False).mean()
     c2 = c1.ewm(span=LEN2, adjust=False).mean()
+
 
     Hadiff = o2 - c2
 
 
     state = "NONE"
 
+    prev_state = None
 
-    # ================= STATE MACHINE =================
+
+    # ================= BAR-BY-BAR PARITY =================
 
     for i in range(5, len(df)):
 
-        atr_ok = (df["ATR"].iloc[i] / df.Close.iloc[i]) * 100 >= ATR_THRESHOLD
+        atr_ok = (df.ATR.iloc[i] / df.Close.iloc[i]) * 100 >= ATR_THRESHOLD
 
         if not atr_ok:
             continue
 
 
-        bullish_flip = (
-            Hadiff.iloc[i] < 0 and
-            Hadiff.iloc[i-1] > 0 and
+        # ===== STATE TRANSITION (TRUE PINE LOGIC) =====
+
+        bullish_transition = (
+            Hadiff.iloc[i-1] <= 0 and
+            Hadiff.iloc[i] > 0 and
             df.Close.iloc[i] > df.Open.iloc[i]
         )
 
-        bearish_flip = (
-            Hadiff.iloc[i] > 0 and
-            Hadiff.iloc[i-1] < 0 and
+        bearish_transition = (
+            Hadiff.iloc[i-1] >= 0 and
+            Hadiff.iloc[i] < 0 and
             df.Close.iloc[i] < df.Open.iloc[i]
         )
 
 
-        if bullish_flip:
+        if bullish_transition:
             state = "CE"
 
-        elif bearish_flip:
+        elif bearish_transition:
             state = "PE"
+
+
+        prev_state = state
 
 
     return state
@@ -157,16 +162,11 @@ def run_strategy(df):
 
 if st.button("RUN SCAN"):
 
-    ce = []
-    pe = []
-    neutral = []
+    ce, pe, neutral = [], [], []
 
     progress = st.progress(0)
 
-    total = len(symbols)
-
-
-    for idx, s in enumerate(symbols):
+    for i, s in enumerate(symbols):
 
         ticker = s + ".NS"
 
@@ -175,8 +175,7 @@ if st.button("RUN SCAN"):
 
         df = data[ticker]
 
-
-        state = run_strategy(df)
+        state = engine(df)
 
 
         if state == "CE":
@@ -193,10 +192,10 @@ if st.button("RUN SCAN"):
             st.write(s, state)
 
 
-        progress.progress((idx+1)/total)
+        progress.progress((i+1)/len(symbols))
 
 
-    st.success("SCAN COMPLETE")
+    st.success("SCAN COMPLETE — FINAL PARITY")
 
 
     st.subheader("🟢 CE Candidates")
