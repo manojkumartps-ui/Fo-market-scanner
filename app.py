@@ -2,332 +2,280 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import requests
-import time
 
-st.set_page_config(page_title="SMC + Smoothed HA Options Scanner", layout="wide")
+st.set_page_config(layout="wide")
 
-st.title("🏹 NSE F&O Smoothed HA + SMC Options Scanner")
+st.title("🏹 NSE F&O Smoothed HA + SMC Scanner")
 
 
-#########################################
-# STRATEGY PARAMETERS
-#########################################
+# =============================
+# PARAMETERS (FROM YOUR STRATEGY)
+# =============================
 
 SWING_LEN = 5
 ATR_LEN = 3
-ATR_FILTER = 2
-GAP_THRESHOLD = 0.5
-BOX_AGE_LIMIT = 15
-
-HA_LEN1 = 5
-HA_LEN2 = 3
+ATR_THRESHOLD = 3.5
+LEN1 = 5
+LEN2 = 3
 
 
-#########################################
-# NSE F&O SYMBOL FETCHER
-#########################################
+# =============================
+# FETCH LIVE NSE F&O LIST
+# =============================
 
 @st.cache_data(ttl=86400)
-def get_fno_symbols():
+def fetch_fno_symbols():
 
-    session = requests.Session()
+    url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    df = pd.read_csv(url)
 
-    session.get("https://www.nseindia.com", headers=headers)
+    symbols = df["SYMBOL"].dropna().unique()
 
-    url = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
+    return sorted(symbols)
 
-    data = session.get(url, headers=headers).json()["data"]
 
-    return [x["symbol"] for x in data]
+symbols = fetch_fno_symbols()
 
+st.write(f"Fetched {len(symbols)} F&O symbols")
 
-symbols = get_fno_symbols()
 
-st.sidebar.success(f"{len(symbols)} F&O symbols loaded")
+# =============================
+# DATA DOWNLOAD
+# =============================
 
+@st.cache_data
+def download_data(symbols):
 
-#########################################
-# ATR CALCULATION
-#########################################
-
-def ATR(df, length):
-
-    hl = df.High - df.Low
-    hc = abs(df.High - df.Close.shift())
-    lc = abs(df.Low - df.Close.shift())
-
-    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-
-    return tr.rolling(length).mean()
-
-
-#########################################
-# STRUCTURE DETECTION (TradingView-style)
-#########################################
-
-def detect_structure(df):
-
-    highs = df.High.values
-    lows = df.Low.values
-
-    lastH = None
-    lastL = None
-
-    for i in range(SWING_LEN, len(df) - SWING_LEN):
-
-        if highs[i] == max(highs[i-SWING_LEN:i+SWING_LEN+1]):
-            lastH = highs[i]
-
-        if lows[i] == min(lows[i-SWING_LEN:i+SWING_LEN+1]):
-            lastL = lows[i]
-
-    if lastH is None or lastL is None:
-        return False, False, None, None
-
-    bull_break = df.Close.iloc[-1] > lastH
-    bear_break = df.Close.iloc[-1] < lastL
-
-    return bull_break, bear_break, lastH, lastL
-
-
-#########################################
-# SMOOTHED HEIKIN ASHI
-#########################################
-
-def smoothed_ha(df):
-
-    sOpen = df.Open.ewm(span=HA_LEN1).mean()
-    sClose = df.Close.ewm(span=HA_LEN1).mean()
-    sHigh = df.High.ewm(span=HA_LEN1).mean()
-    sLow = df.Low.ewm(span=HA_LEN1).mean()
-
-    ha_close = (sOpen + sHigh + sLow + sClose) / 4
-
-    ha_open = [(sOpen.iloc[0] + sClose.iloc[0]) / 2]
-
-    for i in range(1, len(df)):
-        ha_open.append((ha_open[i-1] + ha_close.iloc[i-1]) / 2)
-
-    ha_open = pd.Series(ha_open, index=df.index)
-
-    o2 = ha_open.ewm(span=HA_LEN2).mean()
-    c2 = ha_close.ewm(span=HA_LEN2).mean()
-
-    return o2 - c2
-
-
-#########################################
-# FVG DETECTION
-#########################################
-
-def detect_fvg(df, atr):
-
-    bull_gap = (
-        (df.Low > df.High.shift(2)) &
-        ((df.Low - df.High.shift(2)) > atr * GAP_THRESHOLD)
-    )
-
-    bear_gap = (
-        (df.High < df.Low.shift(2)) &
-        ((df.Low.shift(2) - df.High) > atr * GAP_THRESHOLD)
-    )
-
-    return bull_gap, bear_gap
-
-
-#########################################
-# RULE-4 FVG RETEST
-#########################################
-
-def detect_fvg_retest(df, bull_gap, bear_gap):
-
-    recent_bull = bull_gap.iloc[-BOX_AGE_LIMIT:]
-    recent_bear = bear_gap.iloc[-BOX_AGE_LIMIT:]
-
-    bull_retest = recent_bull.any() and df.Low.iloc[-1] < df.Low.iloc[-2]
-    bear_retest = recent_bear.any() and df.High.iloc[-1] > df.High.iloc[-2]
-
-    return bull_retest, bear_retest
-
-
-#########################################
-# SIGNAL ENGINE
-#########################################
-
-def generate_signal(symbol, df):
-
-    st.subheader(f"Analyzing {symbol}")
-
-    if len(df) < 20:
-
-        st.warning("Not enough candles")
-
-        return "NO SIGNAL"
-
-
-    atr = ATR(df, ATR_LEN)
-
-    atr_pct = atr.iloc[-1] / df.Close.iloc[-1] * 100
-
-    st.write("ATR%:", round(atr_pct, 2))
-
-
-    if atr_pct < ATR_FILTER:
-
-        st.warning("LOW VOLATILITY FILTER")
-
-        return "NO SIGNAL"
-
-
-    bull_break, bear_break, lastH, lastL = detect_structure(df)
-
-    st.write("Structure High:", lastH)
-    st.write("Structure Low:", lastL)
-
-
-    hadiff = smoothed_ha(df)
-
-    ha_buy = hadiff.iloc[-1] < 0 and hadiff.iloc[-2] > 0
-    ha_sell = hadiff.iloc[-1] > 0 and hadiff.iloc[-2] < 0
-
-    st.write("HA Buy:", ha_buy)
-    st.write("HA Sell:", ha_sell)
-
-
-    bull_gap, bear_gap = detect_fvg(df, atr)
-
-    bull_retest, bear_retest = detect_fvg_retest(df, bull_gap, bear_gap)
-
-    st.write("Bull FVG present:", bull_gap.iloc[-5:].any())
-    st.write("Bear FVG present:", bear_gap.iloc[-5:].any())
-
-    st.write("Bull FVG retest:", bull_retest)
-    st.write("Bear FVG retest:", bear_retest)
-
-
-    smc_buy = bull_break and bull_retest
-    smc_sell = bear_break and bear_retest
-
-
-    if smc_buy and ha_buy:
-
-        st.success("CE CANDIDATE CONFIRMED")
-
-        return "CE"
-
-
-    if smc_sell and ha_sell:
-
-        st.error("PE CANDIDATE CONFIRMED")
-
-        return "PE"
-
-
-    return "NO SIGNAL"
-
-
-#########################################
-# DOWNLOAD DATA (MULTI-TICKER SAFE)
-#########################################
-
-def download_batch(symbols):
-
-    tickers = " ".join([s + ".NS" for s in symbols])
+    tickers = [s + ".NS" for s in symbols]
 
     return yf.download(
-        tickers,
+        tickers=tickers,
         period="3mo",
         interval="1d",
-        group_by="column",
+        group_by="ticker",
         progress=False
     )
 
 
-#########################################
-# UI CONTROL
-#########################################
-
-scan_depth = st.sidebar.slider("Stocks to scan", 5, len(symbols), 12)
+data = download_data(symbols)
 
 
-#########################################
-# RUN SCANNER
-#########################################
+# =============================
+# EMA FUNCTION
+# =============================
 
-if st.button("🚀 Run Scanner"):
+def ema(series, length):
 
-    selected = symbols[:scan_depth]
-
-    st.info("Downloading OHLC data...")
-
-    price_data = download_batch(selected)
-
-    ce_list = []
-    pe_list = []
-    neutral_list = []
-
-    progress = st.progress(0)
+    return series.ewm(span=length, adjust=False).mean()
 
 
-    for i, symbol in enumerate(selected):
+# =============================
+# ATR %
+# =============================
 
-        try:
+def atr_percent(df):
 
-            df = pd.DataFrame({
+    tr = pd.concat([
+        df.High - df.Low,
+        abs(df.High - df.Close.shift()),
+        abs(df.Low - df.Close.shift())
+    ], axis=1).max(axis=1)
 
-                "Open": price_data["Open"][symbol + ".NS"],
-                "High": price_data["High"][symbol + ".NS"],
-                "Low": price_data["Low"][symbol + ".NS"],
-                "Close": price_data["Close"][symbol + ".NS"]
+    atr = tr.rolling(ATR_LEN).mean()
 
-            }).dropna()
-
-
-            signal = generate_signal(symbol, df)
-
-            price = round(df.Close.iloc[-1], 2)
+    return (atr / df.Close) * 100
 
 
-            if signal == "CE":
+# =============================
+# PIVOT DETECTION (LIKE PINE)
+# =============================
 
-                ce_list.append([symbol, price])
+def pivot_high(series, length):
 
-
-            elif signal == "PE":
-
-                pe_list.append([symbol, price])
-
-
-            else:
-
-                neutral_list.append([symbol, price])
+    return series[
+        (series.shift(length) < series)
+        &
+        (series.shift(-length) < series)
+    ]
 
 
-        except Exception as e:
+def pivot_low(series, length):
 
-            st.error(f"{symbol} failed → {e}")
-
-
-        progress.progress((i + 1) / scan_depth)
-
-        time.sleep(0.05)
-
-
-    st.divider()
-
-    st.subheader("🟢 CE Candidates")
-
-    st.dataframe(pd.DataFrame(ce_list, columns=["Stock", "Price"]))
+    return series[
+        (series.shift(length) > series)
+        &
+        (series.shift(-length) > series)
+    ]
 
 
-    st.subheader("🔴 PE Candidates")
+# =============================
+# SCANNER ENGINE
+# =============================
 
-    st.dataframe(pd.DataFrame(pe_list, columns=["Stock", "Price"]))
+ce_candidates = []
+pe_candidates = []
+neutral = []
 
 
-    st.subheader("⚪ Neutral")
+for stock in symbols:
 
-    st.dataframe(pd.DataFrame(neutral_list, columns=["Stock", "Price"]))
+    if stock + ".NS" not in data:
+
+        continue
+
+
+    st.write(f"Analyzing {stock}")
+
+    df = data[stock + ".NS"].dropna()
+
+    if len(df) < 40:
+
+        continue
+
+
+    # =============================
+    # ATR FILTER
+    # =============================
+
+    df["ATR%"] = atr_percent(df)
+
+    atr_last = df["ATR%"].iloc[-1]
+
+    st.write("ATR%:", round(atr_last,2))
+
+    if atr_last < ATR_THRESHOLD:
+
+        neutral.append(stock)
+
+        continue
+
+
+    # =============================
+    # SMOOTHED HA
+    # =============================
+
+    sOpen = ema(df.Open, LEN1)
+    sClose = ema(df.Close, LEN1)
+    sHigh = ema(df.High, LEN1)
+    sLow = ema(df.Low, LEN1)
+
+    ha_close = (sOpen + sHigh + sLow + sClose)/4
+
+    ha_open = ha_close.copy()
+
+    ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0])/2
+
+    for i in range(1,len(df)):
+
+        ha_open.iloc[i] = (
+            ha_open.iloc[i-1]
+            +
+            ha_close.iloc[i-1]
+        ) / 2
+
+
+    o2 = ema(ha_open, LEN2)
+    c2 = ema(ha_close, LEN2)
+
+    Hadiff = o2 - c2
+
+
+    ha_buy = (
+
+        (df.Close.iloc[-1] > df.Open.iloc[-1])
+
+        and
+
+        (Hadiff.iloc[-1] < 0)
+
+        and
+
+        (Hadiff.iloc[-4] > 0)
+
+        and
+
+        (df.Close.iloc[-1] > c2.iloc[-1])
+
+    )
+
+
+    ha_sell = (
+
+        (df.Close.iloc[-1] < df.Open.iloc[-1])
+
+        and
+
+        (Hadiff.iloc[-1] > 0)
+
+        and
+
+        (Hadiff.iloc[-4] < 0)
+
+        and
+
+        (df.Close.iloc[-1] < c2.iloc[-1])
+
+    )
+
+
+    # =============================
+    # STRUCTURE BREAK
+    # =============================
+
+    ph = pivot_high(df.High, SWING_LEN)
+    pl = pivot_low(df.Low, SWING_LEN)
+
+    lastH = ph.dropna().iloc[-1] if ph.dropna().size else np.nan
+    lastL = pl.dropna().iloc[-1] if pl.dropna().size else np.nan
+
+
+    bull_break = False
+    bear_break = False
+
+
+    if not np.isnan(lastH):
+
+        bull_break = df.Close.iloc[-1] > lastH
+
+
+    if not np.isnan(lastL):
+
+        bear_break = df.Close.iloc[-1] < lastL
+
+
+    buy_signal = bull_break or ha_buy
+    sell_signal = bear_break or ha_sell
+
+
+    if buy_signal:
+
+        ce_candidates.append(stock)
+
+        st.success("BUY → CE candidate")
+
+
+    elif sell_signal:
+
+        pe_candidates.append(stock)
+
+        st.error("SELL → PE candidate")
+
+
+    else:
+
+        neutral.append(stock)
+
+
+# =============================
+# FINAL OUTPUT
+# =============================
+
+st.subheader("🟢 CE Candidates")
+st.write(ce_candidates)
+
+st.subheader("🔴 PE Candidates")
+st.write(pe_candidates)
+
+st.subheader("⚪ Neutral")
+st.write(neutral)
