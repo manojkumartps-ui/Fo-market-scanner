@@ -11,7 +11,7 @@ st.title("🏹 NSE F&O Smoothed HA + SMC Options Scanner")
 
 
 #########################################
-# STRATEGY PARAMETERS (FROM YOUR SCRIPT)
+# STRATEGY PARAMETERS
 #########################################
 
 SWING_LEN = 5
@@ -65,7 +65,7 @@ def ATR(df, length):
 
 
 #########################################
-# STRUCTURE DETECTION (PINE EQUIVALENT)
+# STRUCTURE DETECTION (TradingView-style)
 #########################################
 
 def detect_structure(df):
@@ -116,9 +116,7 @@ def smoothed_ha(df):
     o2 = ha_open.ewm(span=HA_LEN2).mean()
     c2 = ha_close.ewm(span=HA_LEN2).mean()
 
-    hadiff = o2 - c2
-
-    return hadiff
+    return o2 - c2
 
 
 #########################################
@@ -141,7 +139,7 @@ def detect_fvg(df, atr):
 
 
 #########################################
-# RULE-4 FVG RETEST CHECK
+# RULE-4 FVG RETEST
 #########################################
 
 def detect_fvg_retest(df, bull_gap, bear_gap):
@@ -156,12 +154,19 @@ def detect_fvg_retest(df, bull_gap, bear_gap):
 
 
 #########################################
-# SIGNAL ENGINE (FINAL CE / PE DECISION)
+# SIGNAL ENGINE
 #########################################
 
 def generate_signal(symbol, df):
 
     st.subheader(f"Analyzing {symbol}")
+
+    if len(df) < 20:
+
+        st.warning("Not enough candles")
+
+        return "NO SIGNAL"
+
 
     atr = ATR(df, ATR_LEN)
 
@@ -169,26 +174,19 @@ def generate_signal(symbol, df):
 
     st.write("ATR%:", round(atr_pct, 2))
 
+
     if atr_pct < ATR_FILTER:
 
-        st.warning("LOW VOLATILITY FILTER ACTIVE")
+        st.warning("LOW VOLATILITY FILTER")
 
         return "NO SIGNAL"
 
-
-    ####################################
-    # STRUCTURE CHECK
-    ####################################
 
     bull_break, bear_break, lastH, lastL = detect_structure(df)
 
     st.write("Structure High:", lastH)
     st.write("Structure Low:", lastL)
 
-
-    ####################################
-    # SMOOTHED HA CROSSOVER
-    ####################################
 
     hadiff = smoothed_ha(df)
 
@@ -198,10 +196,6 @@ def generate_signal(symbol, df):
     st.write("HA Buy:", ha_buy)
     st.write("HA Sell:", ha_sell)
 
-
-    ####################################
-    # FVG CHECK
-    ####################################
 
     bull_gap, bear_gap = detect_fvg(df, atr)
 
@@ -213,10 +207,6 @@ def generate_signal(symbol, df):
     st.write("Bull FVG retest:", bull_retest)
     st.write("Bear FVG retest:", bear_retest)
 
-
-    ####################################
-    # FINAL SIGNAL DECISION
-    ####################################
 
     smc_buy = bull_break and bull_retest
     smc_sell = bear_break and bear_retest
@@ -240,7 +230,7 @@ def generate_signal(symbol, df):
 
 
 #########################################
-# DATA DOWNLOAD
+# DOWNLOAD DATA (MULTI-TICKER SAFE)
 #########################################
 
 def download_batch(symbols):
@@ -251,7 +241,7 @@ def download_batch(symbols):
         tickers,
         period="3mo",
         interval="1d",
-        group_by="ticker",
+        group_by="column",
         progress=False
     )
 
@@ -281,37 +271,50 @@ if st.button("🚀 Run Scanner"):
 
     progress = st.progress(0)
 
+
     for i, symbol in enumerate(selected):
 
         try:
 
-            df = price_data[symbol + ".NS"]
+            df = pd.DataFrame({
+
+                "Open": price_data["Open"][symbol + ".NS"],
+                "High": price_data["High"][symbol + ".NS"],
+                "Low": price_data["Low"][symbol + ".NS"],
+                "Close": price_data["Close"][symbol + ".NS"]
+
+            }).dropna()
+
 
             signal = generate_signal(symbol, df)
 
             price = round(df.Close.iloc[-1], 2)
 
+
             if signal == "CE":
+
                 ce_list.append([symbol, price])
 
+
             elif signal == "PE":
+
                 pe_list.append([symbol, price])
 
+
             else:
+
                 neutral_list.append([symbol, price])
+
 
         except Exception as e:
 
             st.error(f"{symbol} failed → {e}")
 
+
         progress.progress((i + 1) / scan_depth)
 
         time.sleep(0.05)
 
-
-    #########################################
-    # FINAL OUTPUT TABLES
-    #########################################
 
     st.divider()
 
@@ -319,9 +322,11 @@ if st.button("🚀 Run Scanner"):
 
     st.dataframe(pd.DataFrame(ce_list, columns=["Stock", "Price"]))
 
+
     st.subheader("🔴 PE Candidates")
 
     st.dataframe(pd.DataFrame(pe_list, columns=["Stock", "Price"]))
+
 
     st.subheader("⚪ Neutral")
 
