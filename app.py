@@ -1,23 +1,19 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("SMC + Smoothed HA Scanner (TradingView Parity Build)")
+st.title("NSE F&O Smoothed HA + SMC Scanner")
 
-
-# ================= PARAMETERS =================
 
 LEN1 = 5
 LEN2 = 3
-
 ATR_LEN = 3
 ATR_THRESHOLD = 3.5
-
 GAP_MULT = 0.5
 BOX_AGE_LIMIT = 15
+
 
 DEBUG_MODE = st.checkbox("Enable Debug Mode")
 
@@ -31,7 +27,6 @@ def tv_ema(series, length):
     ema = series.copy()
 
     for i in range(1, len(series)):
-
         ema.iloc[i] = (
             alpha * series.iloc[i]
             + (1 - alpha) * ema.iloc[i - 1]
@@ -53,10 +48,10 @@ def atr(df):
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= FETCH NSE SYMBOLS =================
+# ================= FETCH F&O SYMBOLS =================
 
 @st.cache_data(ttl=86400)
-def fetch_symbols():
+def fetch_fno():
 
     session = requests.Session()
 
@@ -64,16 +59,21 @@ def fetch_symbols():
 
     session.get("https://www.nseindia.com", headers=headers)
 
-    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
 
-    df = pd.read_csv(url)
+    data = session.get(url, headers=headers).json()
 
-    return df["SYMBOL"].tolist()
+    return sorted(
+        list(set(
+            x["metadata"]["symbol"]
+            for x in data["data"]
+        ))
+    )
 
 
-symbols = fetch_symbols()
+symbols = fetch_fno()
 
-st.success(f"{len(symbols)} NSE symbols loaded")
+st.success(f"{len(symbols)} F&O symbols loaded")
 
 
 # ================= DOWNLOAD DATA =================
@@ -133,7 +133,6 @@ if st.button("RUN SCAN"):
         if atr_percent < ATR_THRESHOLD:
 
             neutral.append(symbol)
-
             continue
 
 
@@ -168,60 +167,30 @@ if st.button("RUN SCAN"):
         Hadiff = o2 - c2
 
 
-        # ================= EXACT PINE PRECEDENCE BUY =================
+        # ================= TRUE CROSSOVER WINDOW =================
 
         ha_buy = (
-
-            (
-                df.Close.iloc[-1] > df.Open.iloc[-1]
-                and Hadiff.iloc[-1] < 0
-                and Hadiff.iloc[-2] > 0
-            )
-
-            or
-
-            Hadiff.iloc[-3] > 0
-
-            or
-
-            (
-                Hadiff.iloc[-4] > 0
-                and df.Close.iloc[-1] > c2.iloc[-1]
-            )
-
+            df.Close.iloc[-1] > df.Open.iloc[-1]
+            and Hadiff.iloc[-1] < 0
+            and max(Hadiff.iloc[-4:-1]) > 0
+            and df.Close.iloc[-1] > c2.iloc[-1]
         )
 
 
-        # ================= EXACT PINE PRECEDENCE SELL =================
-
         ha_sell = (
-
-            (
-                df.Close.iloc[-1] < df.Open.iloc[-1]
-                and Hadiff.iloc[-1] > 0
-                and Hadiff.iloc[-2] < 0
-            )
-
-            or
-
-            Hadiff.iloc[-3] < 0
-
-            or
-
-            (
-                Hadiff.iloc[-4] < 0
-                and df.Close.iloc[-1] < c2.iloc[-1]
-            )
-
+            df.Close.iloc[-1] < df.Open.iloc[-1]
+            and Hadiff.iloc[-1] > 0
+            and min(Hadiff.iloc[-4:-1]) < 0
+            and df.Close.iloc[-1] < c2.iloc[-1]
         )
 
 
         # ================= FVG DETECTION =================
 
-        last_bull_fvg_top = None
-        last_bull_bar = None
+        last_bull = None
+        last_bear = None
 
-        last_bear_fvg_bot = None
+        last_bull_bar = None
         last_bear_bar = None
 
 
@@ -230,17 +199,15 @@ if st.button("RUN SCAN"):
             gap = df["ATR"].iloc[k] * GAP_MULT
 
 
-            if df.Low.iloc[k] > df.High.iloc[k - 2] + gap:
+            if df.Low.iloc[k] > df.High.iloc[k-2] + gap:
 
-                last_bull_fvg_top = df.Low.iloc[k]
-
+                last_bull = df.Low.iloc[k]
                 last_bull_bar = k
 
 
-            if df.High.iloc[k] < df.Low.iloc[k - 2] - gap:
+            if df.High.iloc[k] < df.Low.iloc[k-2] - gap:
 
-                last_bear_fvg_bot = df.High.iloc[k]
-
+                last_bear = df.High.iloc[k]
                 last_bear_bar = k
 
 
@@ -248,69 +215,35 @@ if st.button("RUN SCAN"):
         smc_sell4 = False
 
 
-        # ================= RULE-4 ALIGNMENT =================
-
-        if last_bear_bar is not None:
+        if last_bear_bar:
 
             if len(df) - last_bear_bar <= BOX_AGE_LIMIT:
 
-                prev_exit = df.High.iloc[-2] < last_bear_fvg_bot
-
-                prev_bearish = df.Close.iloc[-2] < df.Open.iloc[-2]
-
-                curr_bullish = df.Close.iloc[-1] > df.Open.iloc[-1]
-
-                smc_buy4 = prev_exit and prev_bearish and curr_bullish
+                smc_buy4 = (
+                    df.High.iloc[-2] < last_bear
+                    and df.Close.iloc[-2] < df.Open.iloc[-2]
+                    and df.Close.iloc[-1] > df.Open.iloc[-1]
+                )
 
 
-        if last_bull_bar is not None:
+        if last_bull_bar:
 
             if len(df) - last_bull_bar <= BOX_AGE_LIMIT:
 
-                prev_exit = df.Low.iloc[-2] > last_bull_fvg_top
-
-                prev_bullish = df.Close.iloc[-2] > df.Open.iloc[-2]
-
-                curr_bearish = df.Close.iloc[-1] < df.Open.iloc[-1]
-
-                smc_sell4 = prev_exit and prev_bullish and curr_bearish
+                smc_sell4 = (
+                    df.Low.iloc[-2] > last_bull
+                    and df.Close.iloc[-2] > df.Open.iloc[-2]
+                    and df.Close.iloc[-1] < df.Open.iloc[-1]
+                )
 
 
         # ================= FINAL SIGNAL =================
 
-        buy_signal = smc_buy4 or ha_buy
-
-        sell_signal = smc_sell4 or ha_sell
-
-
-        if DEBUG_MODE:
-
-            st.write(symbol)
-
-            st.write("ATR%", round(atr_percent, 2))
-
-            st.write("Hadiff[-1]", Hadiff.iloc[-1])
-
-            st.write("Hadiff[-2]", Hadiff.iloc[-2])
-
-            st.write("Hadiff[-3]", Hadiff.iloc[-3])
-
-            st.write("Hadiff[-4]", Hadiff.iloc[-4])
-
-            st.write("HA BUY", ha_buy)
-
-            st.write("HA SELL", ha_sell)
-
-            st.write("Rule4 BUY", smc_buy4)
-
-            st.write("Rule4 SELL", smc_sell4)
-
-
-        if buy_signal:
+        if smc_buy4 or ha_buy:
 
             ce.append(symbol)
 
-        elif sell_signal:
+        elif smc_sell4 or ha_sell:
 
             pe.append(symbol)
 
