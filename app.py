@@ -2,20 +2,16 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import requests
-from textblob import TextBlob
-import gc
 import time
 
 st.set_page_config(page_title="NSE F&O Scanner", layout="wide")
 
-st.title("🏹 NSE F&O Scanner (Low-Memory Engine)")
-
-DEBUG_MODE = st.sidebar.checkbox("Enable Debug Mode", True)
+st.title("🏹 NSE F&O Scanner (20-Day Heikin Ashi Engine)")
 
 
-# ==============================
-# NSE F&O SYMBOL FETCH
-# ==============================
+# ===============================
+# FETCH NSE F&O SYMBOLS
+# ===============================
 
 @st.cache_data(ttl=86400)
 def get_fno_symbols():
@@ -53,62 +49,58 @@ def get_fno_symbols():
 
 symbols = get_fno_symbols()
 
-if DEBUG_MODE:
+st.sidebar.success(
+    f"{len(symbols)} F&O symbols loaded"
+)
 
-    st.sidebar.success(
-        f"Fetched {len(symbols)} F&O symbols"
+
+# ===============================
+# BATCH DOWNLOAD PRICE DATA
+# ===============================
+
+def batch_price_download(symbols):
+
+    tickers = " ".join(
+        [s + ".NS" for s in symbols]
     )
-
-    st.sidebar.write(symbols[:10])
-
-
-# ==============================
-# PRICE FETCH
-# ==============================
-
-def fetch_price(symbol):
 
     df = yf.download(
-        symbol + ".NS",
+        tickers,
         period="1mo",
         interval="1d",
+        group_by="ticker",
+        threads=True,
         progress=False
     )
-
-    if df.empty:
-        raise Exception("Empty dataframe")
-
-    if isinstance(df.columns, pd.MultiIndex):
-
-        df.columns = df.columns.get_level_values(0)
-
-    if len(df) < 10:
-        raise Exception("Insufficient candles")
 
     return df
 
 
-# ==============================
+# ===============================
 # HEIKIN ASHI ENGINE
-# ==============================
+# ===============================
 
-def compute_ha(df):
+def compute_trend(df_symbol):
+
+    if df_symbol.empty:
+
+        return None, None
 
     ha_close = (
-        df["Open"]
-        + df["High"]
-        + df["Low"]
-        + df["Close"]
+        df_symbol["Open"]
+        + df_symbol["High"]
+        + df_symbol["Low"]
+        + df_symbol["Close"]
     ) / 4
 
     ha_open = [
         (
-            df["Open"].iloc[0]
-            + df["Close"].iloc[0]
+            df_symbol["Open"].iloc[0]
+            + df_symbol["Close"].iloc[0]
         ) / 2
     ]
 
-    for i in range(1, len(df)):
+    for i in range(1, len(df_symbol)):
 
         ha_open.append(
             (
@@ -117,143 +109,78 @@ def compute_ha(df):
             ) / 2
         )
 
-    return ha_open[-1], ha_close.iloc[-1]
+    last_open = float(ha_open[-1])
+    last_close = float(ha_close.iloc[-1])
+
+    trend = (
+        "Bullish 🟢"
+        if last_close > last_open
+        else "Bearish 🔴"
+    )
+
+    ltp = round(
+        float(df_symbol["Close"].iloc[-1]),
+        2
+    )
+
+    return trend, ltp
 
 
-# ==============================
-# NEWS SENTIMENT
-# ==============================
-
-def sentiment(symbol):
-
-    ticker = yf.Ticker(symbol + ".NS")
-
-    news = ticker.news
-
-    if not news:
-        return 0.0
-
-    titles = []
-
-    for n in news:
-
-        title = n.get("title")
-
-        if title:
-            titles.append(title)
-
-        if len(titles) == 5:
-            break
-
-    if not titles:
-        return 0.0
-
-    scores = []
-
-    for t in titles:
-
-        scores.append(
-            TextBlob(t).sentiment.polarity
-        )
-
-    return round(sum(scores) / len(scores), 2)
-
-
-# ==============================
-# TREND ENGINE
-# ==============================
-
-def trend_engine(open_val, close_val):
-
-    if float(close_val) > float(open_val):
-
-        return "Bullish 🟢"
-
-    return "Bearish 🔴"
-
-
-# ==============================
-# SIGNAL ENGINE
-# ==============================
-
-def signal_engine(trend, sentiment):
-
-    if trend == "Bullish 🟢" and sentiment > 0.2:
-
-        return "LONG ✅"
-
-    if trend == "Bearish 🔴" and sentiment < -0.2:
-
-        return "SHORT 🔻"
-
-    return "AVOID ⚠️"
-
-
-# ==============================
-# CONTROL PANEL
-# ==============================
+# ===============================
+# UI CONTROL PANEL
+# ===============================
 
 scan_depth = st.sidebar.slider(
     "Scan Depth",
     5,
     len(symbols),
-    10
+    20
 )
 
 
-# ==============================
-# SCANNER LOOP (STREAM SAFE)
-# ==============================
+# ===============================
+# SCANNER ENGINE
+# ===============================
 
 if st.button("🚀 Run Scanner"):
+
+    selected_symbols = symbols[:scan_depth]
+
+    st.info("Downloading OHLC data batch...")
+
+    price_data = batch_price_download(
+        selected_symbols
+    )
 
     results = []
 
     progress = st.progress(0)
 
-    for i, symbol in enumerate(symbols[:scan_depth]):
-
-        st.write(f"Analyzing {symbol}")
+    for i, symbol in enumerate(selected_symbols):
 
         try:
 
-            df = fetch_price(symbol)
+            df_symbol = price_data[symbol + ".NS"]
 
-            open_val, close_val = compute_ha(df)
-
-            trend = trend_engine(
-                open_val,
-                close_val
+            trend, price = compute_trend(
+                df_symbol
             )
 
-            sent = sentiment(symbol)
+            if trend is None:
 
-            signal = signal_engine(
-                trend,
-                sent
-            )
-
-            ltp = round(
-                float(df["Close"].iloc[-1]),
-                2
-            )
-
-            st.success(
-                f"{symbol} → {trend} | ₹{ltp} | Sentiment {sent}"
-            )
+                continue
 
             results.append(
                 {
                     "Stock": symbol,
-                    "Price": ltp,
-                    "Trend": trend,
-                    "Sentiment": sent,
-                    "Signal": signal
+                    "Price": price,
+                    "Trend": trend
                 }
             )
 
-            del df
-            gc.collect()
+            st.success(
+                f"{symbol} → {trend} | ₹{price}"
+            )
 
         except Exception as e:
 
@@ -261,13 +188,24 @@ if st.button("🚀 Run Scanner"):
                 f"{symbol} failed → {e}"
             )
 
-        progress.progress((i + 1) / scan_depth)
+        progress.progress(
+            (i + 1) / scan_depth
+        )
 
-        time.sleep(0.15)
+        time.sleep(0.05)
 
     st.divider()
+
+    st.subheader(
+        "📊 Consolidated Market Report"
+    )
 
     st.dataframe(
         pd.DataFrame(results),
         use_container_width=True
     )
+
+
+st.caption(
+    "Universe: Official NSE F&O list | Engine: 20-Day Heikin Ashi"
+)
