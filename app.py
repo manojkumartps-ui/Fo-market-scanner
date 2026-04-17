@@ -5,25 +5,28 @@ import yfinance as yf
 import requests
 import time
 
-st.set_page_config(page_title="SMC + Smoothed HA Scanner", layout="wide")
+st.set_page_config(page_title="SMC + Smoothed HA Options Scanner", layout="wide")
 
-st.title("🏹 NSE F&O SMC + Smoothed HA Scanner")
+st.title("🏹 NSE F&O Smoothed HA + SMC Options Scanner")
 
 
-# ================= PARAMETERS =================
+#########################################
+# STRATEGY PARAMETERS (FROM YOUR SCRIPT)
+#########################################
 
 SWING_LEN = 5
 ATR_LEN = 3
 ATR_FILTER = 2
 GAP_THRESHOLD = 0.5
 BOX_AGE_LIMIT = 15
-IMPULSE_MULTIPLIER = 1.2
 
 HA_LEN1 = 5
 HA_LEN2 = 3
 
 
-# ================= NSE F&O LIST =================
+#########################################
+# NSE F&O SYMBOL FETCHER
+#########################################
 
 @st.cache_data(ttl=86400)
 def get_fno_symbols():
@@ -34,11 +37,7 @@ def get_fno_symbols():
 
     session.get("https://www.nseindia.com", headers=headers)
 
-    url = (
-        "https://www.nseindia.com/api/"
-        "equity-stockIndices?"
-        "index=SECURITIES%20IN%20F%26O"
-    )
+    url = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
 
     data = session.get(url, headers=headers).json()["data"]
 
@@ -50,7 +49,9 @@ symbols = get_fno_symbols()
 st.sidebar.success(f"{len(symbols)} F&O symbols loaded")
 
 
-# ================= ATR =================
+#########################################
+# ATR CALCULATION
+#########################################
 
 def ATR(df, length):
 
@@ -63,15 +64,28 @@ def ATR(df, length):
     return tr.rolling(length).mean()
 
 
-# ================= STRUCTURE =================
+#########################################
+# STRUCTURE DETECTION (PINE EQUIVALENT)
+#########################################
 
 def detect_structure(df):
 
-    ph = df.High.rolling(SWING_LEN * 2 + 1, center=True).max()
-    pl = df.Low.rolling(SWING_LEN * 2 + 1, center=True).min()
+    highs = df.High.values
+    lows = df.Low.values
 
-    lastH = ph.iloc[-SWING_LEN]
-    lastL = pl.iloc[-SWING_LEN]
+    lastH = None
+    lastL = None
+
+    for i in range(SWING_LEN, len(df) - SWING_LEN):
+
+        if highs[i] == max(highs[i-SWING_LEN:i+SWING_LEN+1]):
+            lastH = highs[i]
+
+        if lows[i] == min(lows[i-SWING_LEN:i+SWING_LEN+1]):
+            lastL = lows[i]
+
+    if lastH is None or lastL is None:
+        return False, False, None, None
 
     bull_break = df.Close.iloc[-1] > lastH
     bear_break = df.Close.iloc[-1] < lastL
@@ -79,7 +93,9 @@ def detect_structure(df):
     return bull_break, bear_break, lastH, lastL
 
 
-# ================= SMOOTHED HA =================
+#########################################
+# SMOOTHED HEIKIN ASHI
+#########################################
 
 def smoothed_ha(df):
 
@@ -100,51 +116,52 @@ def smoothed_ha(df):
     o2 = ha_open.ewm(span=HA_LEN2).mean()
     c2 = ha_close.ewm(span=HA_LEN2).mean()
 
-    return o2, c2
+    hadiff = o2 - c2
+
+    return hadiff
 
 
-# ================= FVG =================
+#########################################
+# FVG DETECTION
+#########################################
 
 def detect_fvg(df, atr):
 
-    impulse = (df.High - df.Low) > atr * IMPULSE_MULTIPLIER
-
     bull_gap = (
-        (df.Low > df.High.shift(2))
-        &
+        (df.Low > df.High.shift(2)) &
         ((df.Low - df.High.shift(2)) > atr * GAP_THRESHOLD)
-        &
-        impulse.shift(1)
     )
 
     bear_gap = (
-        (df.High < df.Low.shift(2))
-        &
+        (df.High < df.Low.shift(2)) &
         ((df.Low.shift(2) - df.High) > atr * GAP_THRESHOLD)
-        &
-        impulse.shift(1)
     )
 
     return bull_gap, bear_gap
 
 
-# ================= RULE 4 LOGIC =================
+#########################################
+# RULE-4 FVG RETEST CHECK
+#########################################
 
-def fvg_retest(df, bull_gap, bear_gap):
+def detect_fvg_retest(df, bull_gap, bear_gap):
 
     recent_bull = bull_gap.iloc[-BOX_AGE_LIMIT:]
     recent_bear = bear_gap.iloc[-BOX_AGE_LIMIT:]
 
-    bull_retest = recent_bull.any() and df.Low.iloc[-1] <= df.Low.iloc[-3]
-
-    bear_retest = recent_bear.any() and df.High.iloc[-1] >= df.High.iloc[-3]
+    bull_retest = recent_bull.any() and df.Low.iloc[-1] < df.Low.iloc[-2]
+    bear_retest = recent_bear.any() and df.High.iloc[-1] > df.High.iloc[-2]
 
     return bull_retest, bear_retest
 
 
-# ================= SIGNAL ENGINE =================
+#########################################
+# SIGNAL ENGINE (FINAL CE / PE DECISION)
+#########################################
 
-def generate_signal(df):
+def generate_signal(symbol, df):
+
+    st.subheader(f"Analyzing {symbol}")
 
     atr = ATR(df, ATR_LEN)
 
@@ -154,18 +171,14 @@ def generate_signal(df):
 
     if atr_pct < ATR_FILTER:
 
-        return "NO SIGNAL", "LOW VOLATILITY"
+        st.warning("LOW VOLATILITY FILTER ACTIVE")
+
+        return "NO SIGNAL"
 
 
-    o2, c2 = smoothed_ha(df)
-
-    hadiff = o2 - c2
-
-
-    ha_buy = (hadiff.iloc[-1] < 0) and (hadiff.iloc[-2] > 0)
-
-    ha_sell = (hadiff.iloc[-1] > 0) and (hadiff.iloc[-2] < 0)
-
+    ####################################
+    # STRUCTURE CHECK
+    ####################################
 
     bull_break, bear_break, lastH, lastL = detect_structure(df)
 
@@ -173,30 +186,62 @@ def generate_signal(df):
     st.write("Structure Low:", lastL)
 
 
+    ####################################
+    # SMOOTHED HA CROSSOVER
+    ####################################
+
+    hadiff = smoothed_ha(df)
+
+    ha_buy = hadiff.iloc[-1] < 0 and hadiff.iloc[-2] > 0
+    ha_sell = hadiff.iloc[-1] > 0 and hadiff.iloc[-2] < 0
+
+    st.write("HA Buy:", ha_buy)
+    st.write("HA Sell:", ha_sell)
+
+
+    ####################################
+    # FVG CHECK
+    ####################################
+
     bull_gap, bear_gap = detect_fvg(df, atr)
 
-    bull_retest, bear_retest = fvg_retest(df, bull_gap, bear_gap)
+    bull_retest, bear_retest = detect_fvg_retest(df, bull_gap, bear_gap)
+
+    st.write("Bull FVG present:", bull_gap.iloc[-5:].any())
+    st.write("Bear FVG present:", bear_gap.iloc[-5:].any())
+
+    st.write("Bull FVG retest:", bull_retest)
+    st.write("Bear FVG retest:", bear_retest)
 
 
-    smc_buy = bull_retest and bull_break
+    ####################################
+    # FINAL SIGNAL DECISION
+    ####################################
 
-    smc_sell = bear_retest and bear_break
+    smc_buy = bull_break and bull_retest
+    smc_sell = bear_break and bear_retest
 
 
     if smc_buy and ha_buy:
 
-        return "BUY", "SMC + HA CONFIRMED"
+        st.success("CE CANDIDATE CONFIRMED")
+
+        return "CE"
 
 
     if smc_sell and ha_sell:
 
-        return "SELL", "SMC + HA CONFIRMED"
+        st.error("PE CANDIDATE CONFIRMED")
+
+        return "PE"
 
 
-    return "NO SIGNAL", "NO ALIGNMENT"
+    return "NO SIGNAL"
 
 
-# ================= DOWNLOAD =================
+#########################################
+# DATA DOWNLOAD
+#########################################
 
 def download_batch(symbols):
 
@@ -211,73 +256,73 @@ def download_batch(symbols):
     )
 
 
-# ================= UI =================
+#########################################
+# UI CONTROL
+#########################################
 
-scan_depth = st.sidebar.slider(
-    "Scan Depth",
-    5,
-    len(symbols),
-    15
-)
+scan_depth = st.sidebar.slider("Stocks to scan", 5, len(symbols), 12)
 
 
-# ================= SCANNER =================
+#########################################
+# RUN SCANNER
+#########################################
 
-if st.button("🚀 Run Scan"):
+if st.button("🚀 Run Scanner"):
 
     selected = symbols[:scan_depth]
 
-    st.info("Downloading OHLC...")
+    st.info("Downloading OHLC data...")
 
     price_data = download_batch(selected)
 
-    results = []
+    ce_list = []
+    pe_list = []
+    neutral_list = []
 
     progress = st.progress(0)
 
-
     for i, symbol in enumerate(selected):
-
-        st.subheader(f"Analyzing {symbol}")
 
         try:
 
             df = price_data[symbol + ".NS"]
 
-            signal, reason = generate_signal(df)
+            signal = generate_signal(symbol, df)
 
             price = round(df.Close.iloc[-1], 2)
 
-            st.write("Signal:", signal)
+            if signal == "CE":
+                ce_list.append([symbol, price])
 
-            st.caption(reason)
+            elif signal == "PE":
+                pe_list.append([symbol, price])
 
-
-            results.append({
-
-                "Stock": symbol,
-                "Price": price,
-                "Signal": signal,
-                "Reason": reason
-
-            })
-
+            else:
+                neutral_list.append([symbol, price])
 
         except Exception as e:
 
             st.error(f"{symbol} failed → {e}")
-
 
         progress.progress((i + 1) / scan_depth)
 
         time.sleep(0.05)
 
 
+    #########################################
+    # FINAL OUTPUT TABLES
+    #########################################
+
     st.divider()
 
-    st.subheader("📊 Consolidated Report")
+    st.subheader("🟢 CE Candidates")
 
-    st.dataframe(pd.DataFrame(results), use_container_width=True)
+    st.dataframe(pd.DataFrame(ce_list, columns=["Stock", "Price"]))
 
+    st.subheader("🔴 PE Candidates")
 
-st.caption("Engine: Corrected SMC + Smoothed HA + ATR Expansion Strategy")
+    st.dataframe(pd.DataFrame(pe_list, columns=["Stock", "Price"]))
+
+    st.subheader("⚪ Neutral")
+
+    st.dataframe(pd.DataFrame(neutral_list, columns=["Stock", "Price"]))
