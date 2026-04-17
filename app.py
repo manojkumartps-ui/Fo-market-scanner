@@ -5,14 +5,14 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — Candidate + Trace Debug")
+st.title("F&O Scanner — Scored Signal Engine (CE/PE + BOS Boost)")
 
 LEN1 = 5
 LEN2 = 3
 ATR_LEN = 3
 ATR_THRESHOLD = 3.5
 
-DEBUG = st.checkbox("Show Trace Example")
+DEBUG = st.checkbox("Show CE/PE Trace Example")
 
 
 # ================= F&O LIST =================
@@ -64,7 +64,7 @@ def atr(df):
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= HA =================
+# ================= HEIKIN ASHI =================
 
 def heikin_ashi(df):
     ha_close = (df.Open + df.High + df.Low + df.Close) / 4
@@ -78,7 +78,20 @@ def heikin_ashi(df):
     return pd.Series(ha_open, index=df.index), pd.Series(ha_close, index=df.index)
 
 
-# ================= STRATEGY =================
+# ================= STRUCTURE (LIGHT BOS / CHOCH) =================
+
+def structure_score(df):
+    recent_high = df.High.rolling(10).max().iloc[-2]
+    recent_low = df.Low.rolling(10).min().iloc[-2]
+    last_close = df.Close.iloc[-1]
+
+    bos_up = last_close > recent_high
+    choch_down = last_close < recent_low
+
+    return bos_up, choch_down
+
+
+# ================= ENGINE =================
 
 def process(symbol, df):
 
@@ -95,13 +108,17 @@ def process(symbol, df):
 
     Hadiff = o2 - c2
 
-    state = "NONE"
-    trace = None
+    bos_up, choch_down = structure_score(df)
+
+    ce_score = 0
+    pe_score = 0
+
+    ce_trace = None
+    pe_trace = None
 
     for i in range(5, len(df)):
 
         atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
-
         if atr_pct < ATR_THRESHOLD:
             continue
 
@@ -120,89 +137,90 @@ def process(symbol, df):
 
 
         if bullish:
-            state = "CE"
-            trace = {
+            ce_score = 1.0 + (0.5 if bos_up else 0)
+
+            ce_trace = {
                 "symbol": symbol,
                 "type": "CE",
-                "index": i,
                 "hadiff_prev": Hadiff.iloc[i-1],
                 "hadiff_curr": Hadiff.iloc[i],
-                "close": df.Close.iloc[i],
-                "open": df.Open.iloc[i],
-                "atr%": atr_pct
+                "atr%": atr_pct,
+                "bos_up": bos_up,
+                "score": ce_score
             }
 
 
         if bearish:
-            state = "PE"
-            trace = {
+            pe_score = 1.0 + (0.5 if choch_down else 0)
+
+            pe_trace = {
                 "symbol": symbol,
                 "type": "PE",
-                "index": i,
                 "hadiff_prev": Hadiff.iloc[i-1],
                 "hadiff_curr": Hadiff.iloc[i],
-                "close": df.Close.iloc[i],
-                "open": df.Open.iloc[i],
-                "atr%": atr_pct
+                "atr%": atr_pct,
+                "choch_down": choch_down,
+                "score": pe_score
             }
 
 
-    return state, trace
+    return ce_score, pe_score, ce_trace, pe_trace
 
 
 # ================= RUN =================
 
 if st.button("RUN SCAN"):
 
-    ce, pe, neutral = [], [], []
-    ce_trace, pe_trace = None, None
+    ce_list = []
+    pe_list = []
+
+    ce_trace_final = None
+    pe_trace_final = None
 
     for s in symbols:
 
         ticker = s + ".NS"
-
         if ticker not in data:
             continue
 
         df = data[ticker]
 
-        state, trace = process(s, df)
+        ce_score, pe_score, ce_trace, pe_trace = process(s, df)
 
 
-        # classification (UNCHANGED LOGIC)
-        if state == "CE":
-            ce.append(s)
-            if ce_trace is None:
-                ce_trace = trace
+        if ce_score > 0:
+            ce_list.append((s, ce_score))
+            if ce_trace_final is None:
+                ce_trace_final = ce_trace
 
-        elif state == "PE":
-            pe.append(s)
-            if pe_trace is None:
-                pe_trace = trace
+        if pe_score > 0:
+            pe_list.append((s, pe_score))
+            if pe_trace_final is None:
+                pe_trace_final = pe_trace
 
-        else:
-            neutral.append(s)
+
+    # ================= SORT =================
+
+    ce_list.sort(key=lambda x: x[1], reverse=True)
+    pe_list.sort(key=lambda x: x[1], reverse=True)
 
 
     # ================= OUTPUT =================
 
-    st.subheader("🟢 CE Candidates")
-    st.write(ce)
+    st.subheader("🟢 CE Candidates (Ranked)")
+    st.write(ce_list)
 
-    st.subheader("🔴 PE Candidates")
-    st.write(pe)
-
-    st.subheader("⚪ Neutral")
-    st.write(neutral)
+    st.subheader("🔴 PE Candidates (Ranked)")
+    st.write(pe_list)
 
 
-    # ================= TRACE DISPLAY =================
+    # ================= TRACE =================
 
     if DEBUG:
 
         st.divider()
-        st.subheader("🧠 CE Example Trace (WHY IT QUALIFIED)")
-        st.write(ce_trace)
+        st.subheader("🧠 CE Example Trace")
+        st.write(ce_trace_final)
 
-        st.subheader("🧠 PE Example Trace (WHY IT QUALIFIED)")
-        st.write(pe_trace)
+        st.subheader("🧠 PE Example Trace")
+        st.write(pe_trace_final)
