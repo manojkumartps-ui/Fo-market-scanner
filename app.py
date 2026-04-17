@@ -5,12 +5,10 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — Latest Candle Signal Engine (CE/PE)")
+st.title("F&O Scanner — Latest Candle Signal Engine (No ATR Filter)")
 
 LEN1 = 5
 LEN2 = 3
-ATR_LEN = 3
-ATR_THRESHOLD = 3.5
 
 
 # ================= F&O LIST =================
@@ -50,18 +48,6 @@ def load(symbols):
 data = load(symbols)
 
 
-# ================= ATR =================
-
-def atr(df):
-    tr = pd.concat([
-        df.High - df.Low,
-        abs(df.High - df.Close.shift()),
-        abs(df.Low - df.Close.shift())
-    ], axis=1).max(axis=1)
-
-    return tr.rolling(ATR_LEN).mean()
-
-
 # ================= HEIKIN ASHI =================
 
 def heikin_ashi(df):
@@ -95,17 +81,11 @@ def smoothed_ha(df):
 def evaluate_latest(df):
 
     df = df.dropna().copy()
-    df["ATR"] = atr(df)
 
     o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
 
     i = len(df) - 1  # ONLY LATEST CANDLE
-
-    atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
-
-    if atr_pct < ATR_THRESHOLD:
-        return "NEUTRAL", None
 
     bullish = (
         Hadiff.iloc[i-1] <= 0 and
@@ -124,8 +104,7 @@ def evaluate_latest(df):
             "hadiff_prev": float(Hadiff.iloc[i-1]),
             "hadiff_curr": float(Hadiff.iloc[i]),
             "close": float(df.Close.iloc[i]),
-            "open": float(df.Open.iloc[i]),
-            "atr%": float(atr_pct)
+            "open": float(df.Open.iloc[i])
         }
 
     if bearish:
@@ -133,8 +112,7 @@ def evaluate_latest(df):
             "hadiff_prev": float(Hadiff.iloc[i-1]),
             "hadiff_curr": float(Hadiff.iloc[i]),
             "close": float(df.Close.iloc[i]),
-            "open": float(df.Open.iloc[i]),
-            "atr%": float(atr_pct)
+            "open": float(df.Open.iloc[i])
         }
 
     return "NEUTRAL", None
