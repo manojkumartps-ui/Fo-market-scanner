@@ -5,24 +5,20 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("NSE F&O Scanner — FINAL TRADINGVIEW PARITY ENGINE")
-
-
-# ================= SETTINGS =================
+st.title("F&O Scanner — Candidate + Trace Debug")
 
 LEN1 = 5
 LEN2 = 3
 ATR_LEN = 3
 ATR_THRESHOLD = 3.5
 
-DEBUG = st.checkbox("Debug Mode")
+DEBUG = st.checkbox("Show Trace Example")
 
 
 # ================= F&O LIST =================
 
 @st.cache_data(ttl=86400)
 def get_fno():
-
     session = requests.Session()
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -31,21 +27,16 @@ def get_fno():
     url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
     data = session.get(url, headers=headers).json()
 
-    return sorted(set(
-        x["metadata"]["symbol"]
-        for x in data["data"]
-    ))
+    return sorted(set(x["metadata"]["symbol"] for x in data["data"]))
 
 
 symbols = get_fno()
-st.success(f"F&O loaded: {len(symbols)}")
 
 
 # ================= DATA =================
 
 @st.cache_data
 def load(symbols):
-
     tickers = [s + ".NS" for s in symbols]
 
     return yf.download(
@@ -64,7 +55,6 @@ data = load(symbols)
 # ================= ATR =================
 
 def atr(df):
-
     tr = pd.concat([
         df.High - df.Low,
         abs(df.High - df.Close.shift()),
@@ -74,10 +64,9 @@ def atr(df):
     return tr.rolling(ATR_LEN).mean()
 
 
-# ================= HEIKIN ASHI =================
+# ================= HA =================
 
 def heikin_ashi(df):
-
     ha_close = (df.Open + df.High + df.Low + df.Close) / 4
 
     ha_open = np.zeros(len(df))
@@ -89,21 +78,14 @@ def heikin_ashi(df):
     return pd.Series(ha_open, index=df.index), pd.Series(ha_close, index=df.index)
 
 
-# ================= PARITY ENGINE =================
+# ================= STRATEGY =================
 
-def engine(df):
+def process(symbol, df):
 
     df = df.dropna().copy()
-    if len(df) < 60:
-        return "NONE"
-
-
     df["ATR"] = atr(df)
 
     ha_open, ha_close = heikin_ashi(df)
-
-
-    # ===== Smoothed HA (exact Pine-style EMA series) =====
 
     o1 = ha_open.ewm(span=LEN1, adjust=False).mean()
     c1 = ha_close.ewm(span=LEN1, adjust=False).mean()
@@ -111,51 +93,61 @@ def engine(df):
     o2 = o1.ewm(span=LEN2, adjust=False).mean()
     c2 = c1.ewm(span=LEN2, adjust=False).mean()
 
-
     Hadiff = o2 - c2
 
-
     state = "NONE"
-
-    prev_state = None
-
-
-    # ================= BAR-BY-BAR PARITY =================
+    trace = None
 
     for i in range(5, len(df)):
 
-        atr_ok = (df.ATR.iloc[i] / df.Close.iloc[i]) * 100 >= ATR_THRESHOLD
+        atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
 
-        if not atr_ok:
+        if atr_pct < ATR_THRESHOLD:
             continue
 
 
-        # ===== STATE TRANSITION (TRUE PINE LOGIC) =====
-
-        bullish_transition = (
+        bullish = (
             Hadiff.iloc[i-1] <= 0 and
             Hadiff.iloc[i] > 0 and
             df.Close.iloc[i] > df.Open.iloc[i]
         )
 
-        bearish_transition = (
+        bearish = (
             Hadiff.iloc[i-1] >= 0 and
             Hadiff.iloc[i] < 0 and
             df.Close.iloc[i] < df.Open.iloc[i]
         )
 
 
-        if bullish_transition:
+        if bullish:
             state = "CE"
+            trace = {
+                "symbol": symbol,
+                "type": "CE",
+                "index": i,
+                "hadiff_prev": Hadiff.iloc[i-1],
+                "hadiff_curr": Hadiff.iloc[i],
+                "close": df.Close.iloc[i],
+                "open": df.Open.iloc[i],
+                "atr%": atr_pct
+            }
 
-        elif bearish_transition:
+
+        if bearish:
             state = "PE"
+            trace = {
+                "symbol": symbol,
+                "type": "PE",
+                "index": i,
+                "hadiff_prev": Hadiff.iloc[i-1],
+                "hadiff_curr": Hadiff.iloc[i],
+                "close": df.Close.iloc[i],
+                "open": df.Open.iloc[i],
+                "atr%": atr_pct
+            }
 
 
-        prev_state = state
-
-
-    return state
+    return state, trace
 
 
 # ================= RUN =================
@@ -163,10 +155,9 @@ def engine(df):
 if st.button("RUN SCAN"):
 
     ce, pe, neutral = [], [], []
+    ce_trace, pe_trace = None, None
 
-    progress = st.progress(0)
-
-    for i, s in enumerate(symbols):
+    for s in symbols:
 
         ticker = s + ".NS"
 
@@ -175,28 +166,25 @@ if st.button("RUN SCAN"):
 
         df = data[ticker]
 
-        state = engine(df)
+        state, trace = process(s, df)
 
 
+        # classification (UNCHANGED LOGIC)
         if state == "CE":
             ce.append(s)
+            if ce_trace is None:
+                ce_trace = trace
 
         elif state == "PE":
             pe.append(s)
+            if pe_trace is None:
+                pe_trace = trace
 
         else:
             neutral.append(s)
 
 
-        if DEBUG:
-            st.write(s, state)
-
-
-        progress.progress((i+1)/len(symbols))
-
-
-    st.success("SCAN COMPLETE — FINAL PARITY")
-
+    # ================= OUTPUT =================
 
     st.subheader("🟢 CE Candidates")
     st.write(ce)
@@ -206,3 +194,15 @@ if st.button("RUN SCAN"):
 
     st.subheader("⚪ Neutral")
     st.write(neutral)
+
+
+    # ================= TRACE DISPLAY =================
+
+    if DEBUG:
+
+        st.divider()
+        st.subheader("🧠 CE Example Trace (WHY IT QUALIFIED)")
+        st.write(ce_trace)
+
+        st.subheader("🧠 PE Example Trace (WHY IT QUALIFIED)")
+        st.write(pe_trace)
