@@ -5,14 +5,12 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — Scored Signal Engine (CE/PE + BOS Boost)")
+st.title("F&O Scanner — TradingView Parity Engine (CE/PE)")
 
 LEN1 = 5
 LEN2 = 3
 ATR_LEN = 3
 ATR_THRESHOLD = 3.5
-
-DEBUG = st.checkbox("Show CE/PE Trace Example")
 
 
 # ================= F&O LIST =================
@@ -78,26 +76,9 @@ def heikin_ashi(df):
     return pd.Series(ha_open, index=df.index), pd.Series(ha_close, index=df.index)
 
 
-# ================= STRUCTURE (LIGHT BOS / CHOCH) =================
+# ================= SMOOTHED HA =================
 
-def structure_score(df):
-    recent_high = df.High.rolling(10).max().iloc[-2]
-    recent_low = df.Low.rolling(10).min().iloc[-2]
-    last_close = df.Close.iloc[-1]
-
-    bos_up = last_close > recent_high
-    choch_down = last_close < recent_low
-
-    return bos_up, choch_down
-
-
-# ================= ENGINE =================
-
-def process(symbol, df):
-
-    df = df.dropna().copy()
-    df["ATR"] = atr(df)
-
+def smoothed_ha(df):
     ha_open, ha_close = heikin_ashi(df)
 
     o1 = ha_open.ewm(span=LEN1, adjust=False).mean()
@@ -106,65 +87,60 @@ def process(symbol, df):
     o2 = o1.ewm(span=LEN2, adjust=False).mean()
     c2 = c1.ewm(span=LEN2, adjust=False).mean()
 
+    return o2, c2
+
+
+# ================= LAST BAR ENGINE (PINE PARITY CORE) =================
+
+def evaluate_latest_bar(df):
+
+    df = df.dropna().copy()
+    df["ATR"] = atr(df)
+
+    o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
 
-    bos_up, choch_down = structure_score(df)
+    i = len(df) - 1  # 🔥 ONLY LAST BAR (TradingView style)
 
-    ce_score = 0
-    pe_score = 0
+    atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
 
-    ce_trace = None
-    pe_trace = None
+    if atr_pct < ATR_THRESHOLD:
+        return "NONE", None
 
-    for i in range(5, len(df)):
+    # ================= EXACT LOGIC =================
 
-        atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
-        if atr_pct < ATR_THRESHOLD:
-            continue
+    bullish = (
+        Hadiff.iloc[i-1] <= 0 and
+        Hadiff.iloc[i] > 0 and
+        df.Close.iloc[i] > df.Open.iloc[i]
+    )
 
+    bearish = (
+        Hadiff.iloc[i-1] >= 0 and
+        Hadiff.iloc[i] < 0 and
+        df.Close.iloc[i] < df.Open.iloc[i]
+    )
 
-        bullish = (
-            Hadiff.iloc[i-1] <= 0 and
-            Hadiff.iloc[i] > 0 and
-            df.Close.iloc[i] > df.Open.iloc[i]
-        )
+    # MUTUAL EXCLUSION GUARANTEE
+    if bullish and not bearish:
+        return "CE", {
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "hadiff_curr": float(Hadiff.iloc[i]),
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i]),
+            "atr%": float(atr_pct)
+        }
 
-        bearish = (
-            Hadiff.iloc[i-1] >= 0 and
-            Hadiff.iloc[i] < 0 and
-            df.Close.iloc[i] < df.Open.iloc[i]
-        )
+    if bearish and not bullish:
+        return "PE", {
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "hadiff_curr": float(Hadiff.iloc[i]),
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i]),
+            "atr%": float(atr_pct)
+        }
 
-
-        if bullish:
-            ce_score = 1.0 + (0.5 if bos_up else 0)
-
-            ce_trace = {
-                "symbol": symbol,
-                "type": "CE",
-                "hadiff_prev": Hadiff.iloc[i-1],
-                "hadiff_curr": Hadiff.iloc[i],
-                "atr%": atr_pct,
-                "bos_up": bos_up,
-                "score": ce_score
-            }
-
-
-        if bearish:
-            pe_score = 1.0 + (0.5 if choch_down else 0)
-
-            pe_trace = {
-                "symbol": symbol,
-                "type": "PE",
-                "hadiff_prev": Hadiff.iloc[i-1],
-                "hadiff_curr": Hadiff.iloc[i],
-                "atr%": atr_pct,
-                "choch_down": choch_down,
-                "score": pe_score
-            }
-
-
-    return ce_score, pe_score, ce_trace, pe_trace
+    return "NONE", None
 
 
 # ================= RUN =================
@@ -173,9 +149,10 @@ if st.button("RUN SCAN"):
 
     ce_list = []
     pe_list = []
+    neutral = []
 
-    ce_trace_final = None
-    pe_trace_final = None
+    ce_trace = None
+    pe_trace = None
 
     for s in symbols:
 
@@ -185,42 +162,40 @@ if st.button("RUN SCAN"):
 
         df = data[ticker]
 
-        ce_score, pe_score, ce_trace, pe_trace = process(s, df)
+        state, trace = evaluate_latest_bar(df)
 
+        if state == "CE":
+            ce_list.append(s)
+            if ce_trace is None:
+                ce_trace = {s: trace}
 
-        if ce_score > 0:
-            ce_list.append((s, ce_score))
-            if ce_trace_final is None:
-                ce_trace_final = ce_trace
+        elif state == "PE":
+            pe_list.append(s)
+            if pe_trace is None:
+                pe_trace = {s: trace}
 
-        if pe_score > 0:
-            pe_list.append((s, pe_score))
-            if pe_trace_final is None:
-                pe_trace_final = pe_trace
-
-
-    # ================= SORT =================
-
-    ce_list.sort(key=lambda x: x[1], reverse=True)
-    pe_list.sort(key=lambda x: x[1], reverse=True)
+        else:
+            neutral.append(s)
 
 
     # ================= OUTPUT =================
 
-    st.subheader("🟢 CE Candidates (Ranked)")
+    st.subheader("🟢 CE Candidates (Current State)")
     st.write(ce_list)
 
-    st.subheader("🔴 PE Candidates (Ranked)")
+    st.subheader("🔴 PE Candidates (Current State)")
     st.write(pe_list)
+
+    st.subheader("⚪ Neutral")
+    st.write(neutral)
 
 
     # ================= TRACE =================
 
-    if DEBUG:
+    st.divider()
 
-        st.divider()
-        st.subheader("🧠 CE Example Trace")
-        st.write(ce_trace_final)
+    st.subheader("🧠 CE Example Trace")
+    st.write(ce_trace)
 
-        st.subheader("🧠 PE Example Trace")
-        st.write(pe_trace_final)
+    st.subheader("🧠 PE Example Trace")
+    st.write(pe_trace)
