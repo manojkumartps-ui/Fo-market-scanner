@@ -4,13 +4,16 @@ import yfinance as yf
 import requests
 import time
 
-st.set_page_config(page_title="NSE F&O Scanner", layout="wide")
+st.set_page_config(
+    page_title="NSE F&O Scanner",
+    layout="wide"
+)
 
-st.title("🏹 NSE F&O Scanner (20-Day Heikin Ashi Engine)")
+st.title("🏹 NSE F&O Scanner (20-Day Heikin Ashi Regime Engine)")
 
 
 # ===============================
-# FETCH NSE F&O SYMBOLS
+# STAGE 1 — FETCH NSE F&O LIST
 # ===============================
 
 @st.cache_data(ttl=86400)
@@ -19,7 +22,8 @@ def get_fno_symbols():
     session = requests.Session()
 
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
 
     session.get(
@@ -29,7 +33,8 @@ def get_fno_symbols():
 
     url = (
         "https://www.nseindia.com/api/"
-        "equity-stockIndices?index=SECURITIES%20IN%20F%26O"
+        "equity-stockIndices?"
+        "index=SECURITIES%20IN%20F%26O"
     )
 
     response = session.get(
@@ -39,12 +44,14 @@ def get_fno_symbols():
 
     response.raise_for_status()
 
-    json_data = response.json()
+    data = response.json()["data"]
 
-    return [
+    symbols = [
         item["symbol"]
-        for item in json_data["data"]
+        for item in data
     ]
+
+    return symbols
 
 
 symbols = get_fno_symbols()
@@ -55,17 +62,17 @@ st.sidebar.success(
 
 
 # ===============================
-# BATCH DOWNLOAD PRICE DATA
+# STAGE 2 — BATCH PRICE DOWNLOAD
 # ===============================
 
-def batch_price_download(symbols):
+def batch_download(symbols):
 
-    tickers = " ".join(
+    ticker_string = " ".join(
         [s + ".NS" for s in symbols]
     )
 
     df = yf.download(
-        tickers,
+        ticker_string,
         period="1mo",
         interval="1d",
         group_by="ticker",
@@ -77,14 +84,30 @@ def batch_price_download(symbols):
 
 
 # ===============================
-# HEIKIN ASHI ENGINE
+# STAGE 3 — HEIKIN ASHI ENGINE
+# TRUE 20-DAY REGIME VERSION
 # ===============================
 
-def compute_trend(df_symbol):
+def compute_ha_regime(df_symbol, symbol):
 
     if df_symbol.empty:
 
-        return None, None
+        st.error(f"{symbol} no OHLC data")
+
+        return None
+
+
+    candle_count = len(df_symbol)
+
+    st.write(f"{symbol} candles fetched:", candle_count)
+
+
+    if candle_count < 20:
+
+        st.warning(f"{symbol} insufficient candles")
+
+        return None
+
 
     ha_close = (
         df_symbol["Open"]
@@ -93,12 +116,14 @@ def compute_trend(df_symbol):
         + df_symbol["Close"]
     ) / 4
 
+
     ha_open = [
         (
             df_symbol["Open"].iloc[0]
             + df_symbol["Close"].iloc[0]
         ) / 2
     ]
+
 
     for i in range(1, len(df_symbol)):
 
@@ -109,21 +134,91 @@ def compute_trend(df_symbol):
             ) / 2
         )
 
-    last_open = float(ha_open[-1])
-    last_close = float(ha_close.iloc[-1])
 
-    trend = (
-        "Bullish 🟢"
-        if last_close > last_open
-        else "Bearish 🔴"
+    ha_open = pd.Series(
+        ha_open,
+        index=df_symbol.index
     )
+
+
+    last20_open = ha_open.iloc[-20:]
+    last20_close = ha_close.iloc[-20:]
+
+
+    bullish_count = (
+        last20_close > last20_open
+    ).sum()
+
+
+    bearish_count = 20 - bullish_count
+
+
+    body_strength = (
+        last20_close - last20_open
+    ).mean()
+
+
+    last_open = float(last20_open.iloc[-1])
+    last_close = float(last20_close.iloc[-1])
+
+
+    if bullish_count >= 14:
+
+        regime = "Bullish 🟢"
+
+    elif bearish_count >= 14:
+
+        regime = "Bearish 🔴"
+
+    else:
+
+        regime = "Sideways ⚪"
+
 
     ltp = round(
         float(df_symbol["Close"].iloc[-1]),
         2
     )
 
-    return trend, ltp
+
+    st.write(
+        f"{symbol} bullish candles:",
+        bullish_count
+    )
+
+    st.write(
+        f"{symbol} bearish candles:",
+        bearish_count
+    )
+
+    st.write(
+        f"{symbol} avg body strength:",
+        round(body_strength, 3)
+    )
+
+    st.write(
+        f"{symbol} last HA candle:",
+        "Bullish"
+        if last_close > last_open
+        else "Bearish"
+    )
+
+
+    return {
+
+        "Stock": symbol,
+
+        "Price": ltp,
+
+        "Trend": regime,
+
+        "BullishCount": bullish_count,
+
+        "BearishCount": bearish_count,
+
+        "BodyStrength": round(body_strength, 3)
+
+    }
 
 
 # ===============================
@@ -131,10 +226,14 @@ def compute_trend(df_symbol):
 # ===============================
 
 scan_depth = st.sidebar.slider(
+
     "Scan Depth",
+
     5,
+
     len(symbols),
-    20
+
+    15
 )
 
 
@@ -142,70 +241,81 @@ scan_depth = st.sidebar.slider(
 # SCANNER ENGINE
 # ===============================
 
-if st.button("🚀 Run Scanner"):
+if st.button("🚀 Run Market Scan"):
 
-    selected_symbols = symbols[:scan_depth]
+    selected = symbols[:scan_depth]
 
-    st.info("Downloading OHLC data batch...")
+    st.info("Downloading OHLC batch...")
 
-    price_data = batch_price_download(
-        selected_symbols
-    )
+    price_data = batch_download(selected)
 
     results = []
 
     progress = st.progress(0)
 
-    for i, symbol in enumerate(selected_symbols):
+
+    for i, symbol in enumerate(selected):
+
+        st.subheader(f"Analyzing {symbol}")
 
         try:
 
-            df_symbol = price_data[symbol + ".NS"]
+            df_symbol = price_data[
+                symbol + ".NS"
+            ]
 
-            trend, price = compute_trend(
-                df_symbol
+            output = compute_ha_regime(
+
+                df_symbol,
+
+                symbol
+
             )
 
-            if trend is None:
+            if output:
 
-                continue
-
-            results.append(
-                {
-                    "Stock": symbol,
-                    "Price": price,
-                    "Trend": trend
-                }
-            )
-
-            st.success(
-                f"{symbol} → {trend} | ₹{price}"
-            )
+                results.append(output)
 
         except Exception as e:
 
             st.error(
+
                 f"{symbol} failed → {e}"
+
             )
 
+
         progress.progress(
+
             (i + 1) / scan_depth
+
         )
+
 
         time.sleep(0.05)
 
+
     st.divider()
 
+
     st.subheader(
+
         "📊 Consolidated Market Report"
+
     )
 
+
     st.dataframe(
+
         pd.DataFrame(results),
+
         use_container_width=True
+
     )
 
 
 st.caption(
-    "Universe: Official NSE F&O list | Engine: 20-Day Heikin Ashi"
+
+    "Universe: Official NSE F&O list | Engine: True 20-Day Heikin Ashi Regime Logic"
+
 )
