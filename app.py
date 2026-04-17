@@ -5,27 +5,28 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
+st.title("🏹 NSE F&O SMC + Smoothed HA Scanner")
 
-st.title("🏹 NSE F&O Smoothed HA + SMC Scanner")
-
-
-# =============================
-# PARAMETERS
-# =============================
+# =====================
+# STRATEGY PARAMETERS
+# =====================
 
 SWING_LEN = 5
 ATR_LEN = 3
 ATR_THRESHOLD = 3.5
+GAP_MULT = 0.5
+BOX_AGE_LIMIT = 15
+
 LEN1 = 5
 LEN2 = 3
 
 
-# =============================
-# FETCH NSE F&O SYMBOLS (FAST API)
-# =============================
+# =====================
+# FETCH NSE F&O SYMBOLS
+# =====================
 
 @st.cache_data(ttl=86400)
-def fetch_fno_symbols():
+def fetch_symbols():
 
     url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
 
@@ -52,17 +53,17 @@ def fetch_fno_symbols():
 
 
 with st.spinner("Fetching NSE F&O universe..."):
-    symbols = fetch_fno_symbols()
+    symbols = fetch_symbols()
 
-st.success(f"{len(symbols)} F&O symbols loaded")
+st.success(f"{len(symbols)} symbols loaded")
 
 
-# =============================
-# DOWNLOAD OHLC DATA
-# =============================
+# =====================
+# DOWNLOAD DATA
+# =====================
 
 @st.cache_data
-def download_data(symbols):
+def load_data(symbols):
 
     tickers = [s + ".NS" for s in symbols]
 
@@ -71,20 +72,20 @@ def download_data(symbols):
         period="3mo",
         interval="1d",
         group_by="ticker",
-        progress=False,
-        threads=True
+        threads=True,
+        progress=False
     )
 
 
-with st.spinner("Downloading market data..."):
-    data = download_data(symbols)
+with st.spinner("Downloading OHLC data..."):
+    data = load_data(symbols)
 
 st.success("Market data ready")
 
 
-# =============================
+# =====================
 # HELPERS
-# =============================
+# =====================
 
 def ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -103,39 +104,38 @@ def atr_percent(df):
     return (atr / df.Close) * 100
 
 
-def pivot_high(series, length):
+def pivot_high(series):
 
     return series[
-        (series.shift(length) < series)
+        (series.shift(SWING_LEN) < series)
         &
-        (series.shift(-length) < series)
+        (series.shift(-SWING_LEN) < series)
     ]
 
 
-def pivot_low(series, length):
+def pivot_low(series):
 
     return series[
-        (series.shift(length) > series)
+        (series.shift(SWING_LEN) > series)
         &
-        (series.shift(-length) > series)
+        (series.shift(-SWING_LEN) > series)
     ]
 
 
-# =============================
-# START SCAN BUTTON
-# =============================
+# =====================
+# SCANNER BUTTON
+# =====================
 
 if st.button("🚀 Start Scan"):
 
     progress = st.progress(0)
     status = st.empty()
 
-    ce_candidates = []
-    pe_candidates = []
+    ce = []
+    pe = []
     neutral = []
 
     total = len(symbols)
-
 
     for i, stock in enumerate(symbols):
 
@@ -148,21 +148,26 @@ if st.button("🚀 Start Scan"):
 
         df = data[ticker].dropna()
 
-        if len(df) < 40:
+        if len(df) < 50:
             continue
 
 
+        # =====================
         # ATR FILTER
+        # =====================
 
         df["ATR%"] = atr_percent(df)
 
-        if df["ATR%"].iloc[-1] < ATR_THRESHOLD:
+        atr_last = df["ATR%"].iloc[-1]
 
+        if atr_last < ATR_THRESHOLD:
             neutral.append(stock)
             continue
 
 
+        # =====================
         # SMOOTHED HA
+        # =====================
 
         sOpen = ema(df.Open, LEN1)
         sClose = ema(df.Close, LEN1)
@@ -176,7 +181,6 @@ if st.button("🚀 Start Scan"):
         ha_open.iloc[0] = (sOpen.iloc[0] + sClose.iloc[0]) / 2
 
         for j in range(1, len(df)):
-
             ha_open.iloc[j] = (
                 ha_open.iloc[j - 1]
                 + ha_close.iloc[j - 1]
@@ -187,6 +191,10 @@ if st.button("🚀 Start Scan"):
         c2 = ema(ha_close, LEN2)
 
         Hadiff = o2 - c2
+
+
+        prev_bullish = df.Close.iloc[-2] > df.Open.iloc[-2]
+        prev_bearish = df.Close.iloc[-2] < df.Open.iloc[-2]
 
 
         ha_buy = (
@@ -209,9 +217,12 @@ if st.button("🚀 Start Scan"):
         )
 
 
-        ph = pivot_high(df.High, SWING_LEN)
-        pl = pivot_low(df.Low, SWING_LEN)
+        # =====================
+        # STRUCTURE
+        # =====================
 
+        ph = pivot_high(df.High)
+        pl = pivot_low(df.Low)
 
         lastH = ph.dropna().iloc[-1] if ph.dropna().size else np.nan
         lastL = pl.dropna().iloc[-1] if pl.dropna().size else np.nan
@@ -220,26 +231,111 @@ if st.button("🚀 Start Scan"):
         bull_break = False
         bear_break = False
 
-
         if not np.isnan(lastH):
             bull_break = df.Close.iloc[-1] > lastH
-
 
         if not np.isnan(lastL):
             bear_break = df.Close.iloc[-1] < lastL
 
 
-        buy_signal = bull_break or ha_buy
-        sell_signal = bear_break or ha_sell
+        # =====================
+        # FVG DETECTION
+        # =====================
+
+        last_bull_fvg_top = None
+        last_bull_fvg_bar = None
+
+        last_bear_fvg_bot = None
+        last_bear_fvg_bar = None
+
+
+        atr_series = df["ATR%"] / 100 * df.Close
+
+        for k in range(2, len(df)):
+
+            gap = atr_series.iloc[k] * GAP_MULT
+
+            if df.Low.iloc[k] > df.High.iloc[k-2] + gap:
+
+                last_bull_fvg_top = df.Low.iloc[k]
+                last_bull_fvg_bar = k
+
+
+            if df.High.iloc[k] < df.Low.iloc[k-2] - gap:
+
+                last_bear_fvg_bot = df.High.iloc[k]
+                last_bear_fvg_bar = k
+
+
+        bull_fvg_fresh = (
+
+            last_bull_fvg_bar
+            and len(df) - last_bull_fvg_bar <= BOX_AGE_LIMIT
+
+        )
+
+
+        bear_fvg_fresh = (
+
+            last_bear_fvg_bar
+            and len(df) - last_bear_fvg_bar <= BOX_AGE_LIMIT
+
+        )
+
+
+        broke_above_blue = (
+
+            bull_fvg_fresh
+            and df.Low.iloc[-2] > last_bull_fvg_top
+
+        )
+
+
+        broke_below_orange = (
+
+            bear_fvg_fresh
+            and df.High.iloc[-2] < last_bear_fvg_bot
+
+        )
+
+
+        smc_buy4 = (
+
+            broke_below_orange
+            and df.Close.iloc[-1] > df.Open.iloc[-1]
+            and prev_bearish
+
+        )
+
+
+        smc_sell4 = (
+
+            broke_above_blue
+            and df.Close.iloc[-1] < df.Open.iloc[-1]
+            and prev_bullish
+
+        )
+
+
+        # =====================
+        # FINAL SIGNAL
+        # =====================
+
+        buy_signal = smc_buy4 or (ha_buy and not prev_bullish)
+
+        sell_signal = smc_sell4 or (ha_sell and not prev_bearish)
 
 
         if buy_signal:
-            ce_candidates.append(stock)
+
+            ce.append(stock)
 
         elif sell_signal:
-            pe_candidates.append(stock)
+
+            pe.append(stock)
 
         else:
+
             neutral.append(stock)
 
 
@@ -250,10 +346,12 @@ if st.button("🚀 Start Scan"):
 
 
     st.subheader("🟢 CE Candidates")
-    st.write(ce_candidates)
+    st.write(ce)
+
 
     st.subheader("🔴 PE Candidates")
-    st.write(pe_candidates)
+    st.write(pe)
+
 
     st.subheader("⚪ Neutral")
     st.write(neutral)
