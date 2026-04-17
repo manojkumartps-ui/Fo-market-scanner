@@ -5,7 +5,7 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — TradingView Parity Engine (CE/PE)")
+st.title("F&O Scanner — Last Valid Signal Engine (CE/PE)")
 
 LEN1 = 5
 LEN2 = 3
@@ -90,9 +90,9 @@ def smoothed_ha(df):
     return o2, c2
 
 
-# ================= LAST BAR ENGINE (PINE PARITY CORE) =================
+# ================= LAST VALID SIGNAL ENGINE =================
 
-def evaluate_latest_bar(df):
+def evaluate_last_signal(df):
 
     df = df.dropna().copy()
     df["ATR"] = atr(df)
@@ -100,47 +100,55 @@ def evaluate_latest_bar(df):
     o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
 
-    i = len(df) - 1  # 🔥 ONLY LAST BAR (TradingView style)
+    last_signal = "NONE"
+    last_trace = None
 
-    atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
+    # scan full history (THIS is key fix)
+    for i in range(2, len(df)):
 
-    if atr_pct < ATR_THRESHOLD:
-        return "NONE", None
+        atr_pct = df.ATR.iloc[i] / df.Close.iloc[i] * 100
+        if atr_pct < ATR_THRESHOLD:
+            continue
 
-    # ================= EXACT LOGIC =================
 
-    bullish = (
-        Hadiff.iloc[i-1] <= 0 and
-        Hadiff.iloc[i] > 0 and
-        df.Close.iloc[i] > df.Open.iloc[i]
-    )
+        bullish = (
+            Hadiff.iloc[i-1] <= 0 and
+            Hadiff.iloc[i] > 0 and
+            df.Close.iloc[i] > df.Open.iloc[i]
+        )
 
-    bearish = (
-        Hadiff.iloc[i-1] >= 0 and
-        Hadiff.iloc[i] < 0 and
-        df.Close.iloc[i] < df.Open.iloc[i]
-    )
+        bearish = (
+            Hadiff.iloc[i-1] >= 0 and
+            Hadiff.iloc[i] < 0 and
+            df.Close.iloc[i] < df.Open.iloc[i]
+        )
 
-    # MUTUAL EXCLUSION GUARANTEE
-    if bullish and not bearish:
-        return "CE", {
-            "hadiff_prev": float(Hadiff.iloc[i-1]),
-            "hadiff_curr": float(Hadiff.iloc[i]),
-            "close": float(df.Close.iloc[i]),
-            "open": float(df.Open.iloc[i]),
-            "atr%": float(atr_pct)
-        }
 
-    if bearish and not bullish:
-        return "PE", {
-            "hadiff_prev": float(Hadiff.iloc[i-1]),
-            "hadiff_curr": float(Hadiff.iloc[i]),
-            "close": float(df.Close.iloc[i]),
-            "open": float(df.Open.iloc[i]),
-            "atr%": float(atr_pct)
-        }
+        if bullish:
+            last_signal = "CE"
+            last_trace = {
+                "bar_index": i,
+                "hadiff_prev": float(Hadiff.iloc[i-1]),
+                "hadiff_curr": float(Hadiff.iloc[i]),
+                "close": float(df.Close.iloc[i]),
+                "open": float(df.Open.iloc[i]),
+                "atr%": float(atr_pct)
+            }
 
-    return "NONE", None
+
+        if bearish:
+            last_signal = "PE"
+            last_trace = {
+                "bar_index": i,
+                "hadiff_prev": float(Hadiff.iloc[i-1]),
+                "hadiff_curr": float(Hadiff.iloc[i]),
+                "close": float(df.Close.iloc[i]),
+                "open": float(df.Open.iloc[i]),
+                "atr%": float(atr_pct)
+            }
+
+
+    return last_signal, last_trace
 
 
 # ================= RUN =================
@@ -151,8 +159,8 @@ if st.button("RUN SCAN"):
     pe_list = []
     neutral = []
 
-    ce_trace = None
-    pe_trace = None
+    ce_example = None
+    pe_example = None
 
     for s in symbols:
 
@@ -162,17 +170,18 @@ if st.button("RUN SCAN"):
 
         df = data[ticker]
 
-        state, trace = evaluate_latest_bar(df)
+        signal, trace = evaluate_last_signal(df)
 
-        if state == "CE":
+
+        if signal == "CE":
             ce_list.append(s)
-            if ce_trace is None:
-                ce_trace = {s: trace}
+            if ce_example is None:
+                ce_example = {s: trace}
 
-        elif state == "PE":
+        elif signal == "PE":
             pe_list.append(s)
-            if pe_trace is None:
-                pe_trace = {s: trace}
+            if pe_example is None:
+                pe_example = {s: trace}
 
         else:
             neutral.append(s)
@@ -180,10 +189,10 @@ if st.button("RUN SCAN"):
 
     # ================= OUTPUT =================
 
-    st.subheader("🟢 CE Candidates (Current State)")
+    st.subheader("🟢 CE Candidates (Last Valid Signal)")
     st.write(ce_list)
 
-    st.subheader("🔴 PE Candidates (Current State)")
+    st.subheader("🔴 PE Candidates (Last Valid Signal)")
     st.write(pe_list)
 
     st.subheader("⚪ Neutral")
@@ -195,7 +204,7 @@ if st.button("RUN SCAN"):
     st.divider()
 
     st.subheader("🧠 CE Example Trace")
-    st.write(ce_trace)
+    st.write(ce_example)
 
     st.subheader("🧠 PE Example Trace")
-    st.write(pe_trace)
+    st.write(pe_example)
