@@ -5,7 +5,7 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import nltk
 import time
 
-# --- INITIALIZATION ---
+# --- STAGE 0: INITIALIZATION ---
 @st.cache_resource
 def setup_nlp():
     nltk.download('vader_lexicon', quiet=True)
@@ -16,78 +16,87 @@ sia = setup_nlp()
 def get_fno_list():
     return ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS"]
 
-# --- FIXED HEIKIN ASHI LOGIC ---
-def calculate_ha_trend(symbol):
+# --- STAGE 1: HEIKIN ASHI WITH STEP-BY-STEP DEBUG ---
+def calculate_ha_trend_debug(symbol):
     try:
-        # Fetch data and force single-level columns
-        data = yf.download(symbol, period="5d", interval="1d", progress=False)
+        # FORCE: multi_level_index=False ensures a flat table
+        df = yf.download(symbol, period="5d", interval="1d", progress=False, multi_level_index=False)
         
-        # FIX: Check if empty using .empty correctly
-        if data.empty or len(data) < 2:
-            return "ERROR", 0, "No data available"
+        if df.empty or len(df) < 2:
+            return "ERROR", 0, "Insufficient Data (Need 2+ days)"
 
-        # FIX: Flatten multi-index columns if they exist
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        # DEBUG: Show the raw data we received
+        st.write(f"   📊 *DEBUG: Raw Data Sample for {symbol}*")
+        st.dataframe(df.tail(2))
 
-        # Access last two days safely
-        today = data.iloc[-1]
-        yesterday = data.iloc[-2]
+        # Standard OHLC
+        today = df.iloc[-1]
+        prev = df.iloc[-2]
         
-        # HA Logic
+        # STEP 1: HA Close = (O+H+L+C)/4
         ha_close = (today['Open'] + today['High'] + today['Low'] + today['Close']) / 4
-        ha_open = (yesterday['Open'] + yesterday['Close']) / 2
+        
+        # STEP 2: HA Open = (Prev_Open + Prev_Close) / 2
+        ha_open = (prev['Open'] + prev['Close']) / 2
+        
+        st.write(f"   📐 *DEBUG: HA Calculation -> Open: {round(ha_open, 2)} | Close: {round(ha_close, 2)}*")
         
         trend = "Bullish 🟢" if ha_close > ha_open else "Bearish 🔴"
         return trend, round(float(today['Close']), 2), "Success"
     except Exception as e:
-        return "ERROR", 0, str(e)
+        return "ERROR", 0, f"HA Logic Failed: {str(e)}"
 
-# --- FIXED SENTIMENT LOGIC ---
-def get_crowd_score(symbol):
+# --- STAGE 2: SENTIMENT WITH DATA INSPECTION ---
+def get_crowd_score_debug(symbol):
     try:
         ticker = yf.Ticker(symbol)
         news = ticker.news
-        if not news or len(news) == 0:
-            return 0.0, "No Headlines Found"
         
-        # FIX: Access titles using .get() to prevent 'title' key errors
+        if not news:
+            return 0.0, "No Headlines Found"
+
+        st.write(f"   📝 *DEBUG: Found {len(news)} headlines. Scoring...*")
+        
         scores = []
         for n in news[:5]:
-            title = n.get('title', n.get('description', ''))
-            if title:
-                scores.append(sia.polarity_scores(title)['compound'])
-        
-        if not scores: return 0.0, "Zero scores generated"
+            # Inspect structure for titles or descriptions
+            text = n.get('title') or n.get('description')
+            if text:
+                val = sia.polarity_scores(text)['compound']
+                scores.append(val)
+                st.write(f"      - {text[:50]}... | Score: {val}")
+
+        if not scores: return 0.0, "Zero valid scores"
         avg_score = round(sum(scores) / len(scores), 2)
-        return avg_score, f"Analyzed {len(scores)} headlines"
+        return avg_score, "Calculated Successfully"
     except Exception as e:
-        return 0.0, f"Sentiment Error: {str(e)}"
+        return 0.0, f"Sentiment Debug Error: {str(e)}"
 
 # --- UI ---
-st.title("🛡️ NSE F&O Debug Scanner (V2 Fixed)")
+st.title("🧪 Full-Logic NSE Debug Scanner")
 
-if st.button("🚀 Start Debug Scan"):
+if st.button("🚀 Start Deep-Logic Scan"):
     stocks = get_fno_list()
-    final_data = []
+    final_results = []
     
     for stock in stocks:
-        with st.expander(f"🔍 Analyzing: {stock}", expanded=True):
-            # Phase 1
-            st.write("**Phase 1: Price Data**")
-            trend, price, p_msg = calculate_ha_trend(stock)
+        with st.expander(f"🔍 DEEP DEBUG: {stock}", expanded=True):
+            # Phase 1: HA
+            st.markdown("### 🟢 Phase 1: Heikin Ashi Logic")
+            trend, price, p_msg = calculate_ha_trend_debug(stock)
             if trend != "ERROR":
-                st.success(f"Trend: {trend} | Price: ₹{price}")
+                st.success(f"Final Trend: {trend}")
             else:
-                st.error(f"Logic Error: {p_msg}")
+                st.error(p_msg)
             
-            # Phase 2
-            st.write("**Phase 2: Crowd Scoring**")
-            score, s_msg = get_crowd_score(stock)
-            st.info(f"Score: {score} | {s_msg}")
+            # Phase 2: Sentiment
+            st.markdown("### 🔵 Phase 2: Crowd Scoring")
+            score, s_msg = get_crowd_score_debug(stock)
+            st.info(f"Final Score: {score} ({s_msg})")
 
-            final_data.append({"Stock": stock, "Price": price, "Trend": trend, "Sentiment": score})
-            time.sleep(0.5)
+            final_results.append({"Stock": stock, "Price": price, "Trend": trend, "Sentiment": score})
+            time.sleep(1)
 
     st.divider()
-    st.dataframe(pd.DataFrame(final_data), use_container_width=True)
+    st.subheader("📊 Final Market Dashboard")
+    st.dataframe(pd.DataFrame(final_results), use_container_width=True)
