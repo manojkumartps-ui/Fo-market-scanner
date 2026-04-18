@@ -7,8 +7,8 @@ import requests
 st.set_page_config(layout="wide")
 st.title("F&O Scanner — Latest Candle Signal Engine (No ATR Filter)")
 
-LEN1 = 5
-LEN2 = 3
+LEN1 = 3
+LEN2 = 2
 
 
 # ================= F&O LIST =================
