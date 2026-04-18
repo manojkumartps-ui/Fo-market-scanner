@@ -5,25 +5,34 @@ import yfinance as yf
 import requests
 
 st.set_page_config(layout="wide")
-st.title("F&O Scanner — Momentum + SMC Engine")
+st.title("F&O Scanner — Latest Candle Signal Engine")
 
-LEN1 = 3
-LEN2 = 2
-SMC_LOOKBACK = 10 # Lookback for BOS/CHoCH
+# ================= BULLET 1 ADOPTED =================
+# Faster smoothing to catch Day 1 trend shifts
+LEN1 = 3  
+LEN2 = 2  
 
-# ================= F&O LIST =================
+
+# ================= STABLE F&O SOURCE =================
 
 @st.cache_data(ttl=86400)
 def get_fno():
-    # Stable source to avoid JSONDecodeError on Streamlit Cloud
+    """
+    Fetches the actual F&O list from a reliable public CSV.
+    This bypasses NSE blocking issues on Streamlit Cloud.
+    """
     url = "https://kite.trade"
     try:
         df = pd.read_csv(url)
-        return sorted(df[df['segment'] == 'NFO-FUT']['name'].unique().tolist())
-    except:
-        return ["MARICO", "SUPREMEIND", "RELIANCE", "TCS", "HDFCBANK", "INFY", "SBIN"]
+        # Filter for NSE Futures segment to get individual stocks
+        fno_df = df[df['segment'] == 'NFO-FUT']
+        return sorted(fno_df['name'].unique().tolist())
+    except Exception as e:
+        st.error(f"Critical Error: Unable to fetch stock list. {e}")
+        return []
 
 symbols = get_fno()
+
 
 # ================= DATA =================
 
@@ -41,15 +50,19 @@ def load(symbols):
 
 data = load(symbols)
 
+
 # ================= HEIKIN ASHI =================
 
 def heikin_ashi(df):
+    # Standard HA calculation
     ha_close = (df.Open + df.High + df.Low + df.Close) / 4
     ha_open = np.zeros(len(df))
-    ha_open = (df.Open.iloc + df.Close.iloc) / 2
+    # Corrected indexing for Streamlit compatibility
+    ha_open[0] = (df.Open.iloc[0] + df.Close.iloc[0]) / 2
     for i in range(1, len(df)):
         ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
     return pd.Series(ha_open, index=df.index), pd.Series(ha_close, index=df.index)
+
 
 # ================= SMOOTHED HA =================
 
@@ -61,43 +74,37 @@ def smoothed_ha(df):
     c2 = c1.ewm(span=LEN2, adjust=False).mean()
     return o2, c2
 
-# ================= LATEST CANDLE ENGINE + SMC =================
+
+# ================= SIGNAL ENGINE =================
 
 def evaluate_latest(df):
     df = df.dropna().copy()
-    if len(df) < 20: return "NEUTRAL", None
+    if len(df) < 5: return "NEUTRAL", None
 
     o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
     i = len(df) - 1
 
-    # --- YOUR ORIGINAL LOGIC (UNTOUCHED) ---
-    sha_bullish = (Hadiff.iloc[i-1] <= 0 and Hadiff.iloc[i] > 0 and df.Close.iloc[i] > df.Open.iloc[i])
-    sha_bearish = (Hadiff.iloc[i-1] >= 0 and Hadiff.iloc[i] < 0 and df.Close.iloc[i] < df.Open.iloc[i])
+    # Signal Logic
+    bullish = (Hadiff.iloc[i-1] <= 0 and Hadiff.iloc[i] > 0 and df.Close.iloc[i] > df.Open.iloc[i])
+    bearish = (Hadiff.iloc[i-1] >= 0 and Hadiff.iloc[i] < 0 and df.Close.iloc[i] < df.Open.iloc[i])
 
-    # --- ADDITIONAL SMC LOGIC (BOS/CHoCH) ---
-    # Break of Structure: Price breaks the highest/lowest of the recent lookback
-    swing_high = df['High'].iloc[-SMC_LOOKBACK:-1].max()
-    swing_low = df['Low'].iloc[-SMC_LOOKBACK:-1].min()
-    
-    smc_bullish = (df.Close.iloc[i] > swing_high and c2.iloc[i] > o2.iloc[i])
-    smc_bearish = (df.Close.iloc[i] < swing_low and c2.iloc[i] < o2.iloc[i])
-
-    if sha_bullish or smc_bullish:
+    if bullish:
         return "BUY", {
-            "signal_type": "SHA Crossover" if sha_bullish else "SMC BOS",
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
             "hadiff_curr": float(Hadiff.iloc[i]),
-            "close": float(df.Close.iloc[i])
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i])
         }
-
-    if sha_bearish or smc_bearish:
+    if bearish:
         return "SELL", {
-            "signal_type": "SHA Crossover" if sha_bearish else "SMC BOS",
+            "hadiff_prev": float(Hadiff.iloc[i-1]),
             "hadiff_curr": float(Hadiff.iloc[i]),
-            "close": float(df.Close.iloc[i])
+            "close": float(df.Close.iloc[i]),
+            "open": float(df.Open.iloc[i])
         }
-
     return "NEUTRAL", None
+
 
 # ================= RUN =================
 
@@ -109,20 +116,19 @@ if st.button("RUN SCAN"):
         ticker = s + ".NS"
         if ticker not in data or data[ticker].empty: continue
         signal, trace = evaluate_latest(data[ticker])
-        
         if signal == "BUY":
-            buy_list.append(f"{s} ({trace['signal_type']})")
+            buy_list.append(s)
             if buy_trace is None: buy_trace = {s: trace}
         elif signal == "SELL":
-            sell_list.append(f"{s} ({trace['signal_type']})")
+            sell_list.append(s)
             if sell_trace is None: sell_trace = {s: trace}
         else:
             neutral.append(s)
 
-    st.subheader("🟢 BUY Candidates")
+    st.subheader(f"🟢 BUY Candidates ({len(buy_list)})")
     st.write(buy_list)
-    st.subheader("🔴 SELL Candidates")
+    st.subheader(f"🔴 SELL Candidates ({len(sell_list)})")
     st.write(sell_list)
     st.divider()
     st.subheader("🧠 Example Trace")
-    st.write({"Latest Buy": buy_trace, "Latest Sell": sell_trace})
+    st.write({"BUY": buy_trace, "SELL": sell_trace})
