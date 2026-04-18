@@ -173,4 +173,4 @@ if st.button("RUN SCAN"):
     st.write(buy_trace)
 
     st.subheader("🧠 SELL Example Trace")
-    st.write(sell_trace).  
+    st.write(sell_trace)
