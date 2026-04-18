@@ -7,9 +7,8 @@ import requests
 st.set_page_config(layout="wide")
 st.title("F&O Scanner — Latest Candle Signal Engine (No ATR Filter)")
 
-# ================= BULLET 1 ADOPTED =================
-LEN1 = 3  # Changed from 5
-LEN2 = 2  # Changed from 3
+LEN1 = 5
+LEN2 = 3
 
 
 # ================= F&O LIST =================
@@ -21,7 +20,7 @@ def get_fno():
 
     session.get("https://www.nseindia.com", headers=headers)
 
-    url = "https://nseindia.com"
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=FO"
     data = session.get(url, headers=headers).json()
 
     return sorted(set(x["metadata"]["symbol"] for x in data["data"]))
@@ -174,4 +173,4 @@ if st.button("RUN SCAN"):
     st.write(buy_trace)
 
     st.subheader("🧠 SELL Example Trace")
-    st.write(sell_trace)
+    st.write(sell_trace).  
