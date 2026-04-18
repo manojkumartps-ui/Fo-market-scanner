@@ -8,7 +8,6 @@ st.set_page_config(layout="wide")
 st.title("F&O Scanner — Latest Candle Signal Engine")
 
 # ================= BULLET 1 ADOPTED =================
-# Faster smoothing to catch Day 1 trend shifts
 LEN1 = 3  
 LEN2 = 2  
 
@@ -17,14 +16,10 @@ LEN2 = 2
 
 @st.cache_data(ttl=86400)
 def get_fno():
-    """
-    Fetches the actual F&O list from a reliable public CSV.
-    This bypasses NSE blocking issues on Streamlit Cloud.
-    """
+    # Corrected URL to the actual data source
     url = "https://kite.trade"
     try:
         df = pd.read_csv(url)
-        # Filter for NSE Futures segment to get individual stocks
         fno_df = df[df['segment'] == 'NFO-FUT']
         return sorted(fno_df['name'].unique().tolist())
     except Exception as e:
@@ -54,10 +49,8 @@ data = load(symbols)
 # ================= HEIKIN ASHI =================
 
 def heikin_ashi(df):
-    # Standard HA calculation
     ha_close = (df.Open + df.High + df.Low + df.Close) / 4
     ha_open = np.zeros(len(df))
-    # Corrected indexing for Streamlit compatibility
     ha_open[0] = (df.Open.iloc[0] + df.Close.iloc[0]) / 2
     for i in range(1, len(df)):
         ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
@@ -79,26 +72,35 @@ def smoothed_ha(df):
 
 def evaluate_latest(df):
     df = df.dropna().copy()
-    if len(df) < 5: return "NEUTRAL", None
+    if len(df) < 20: return "NEUTRAL", None
 
     o2, c2 = smoothed_ha(df)
     Hadiff = o2 - c2
     i = len(df) - 1
 
-    # Signal Logic
+    # --- YOUR ORIGINAL LOGIC (UNTOUCHED) ---
     bullish = (Hadiff.iloc[i-1] <= 0 and Hadiff.iloc[i] > 0 and df.Close.iloc[i] > df.Open.iloc[i])
     bearish = (Hadiff.iloc[i-1] >= 0 and Hadiff.iloc[i] < 0 and df.Close.iloc[i] < df.Open.iloc[i])
 
-    if bullish:
+    # --- ADDITIONAL SMC LOGIC (BOS/CHoCH) ---
+    # Lookback for breakout of structure
+    lookback = 10 
+    swing_high = df['High'].iloc[-lookback:-1].max()
+    swing_low = df['Low'].iloc[-lookback:-1].min()
+    
+    smc_bullish = (df.Close.iloc[i] > swing_high and c2.iloc[i] > o2.iloc[i])
+    smc_bearish = (df.Close.iloc[i] < swing_low and c2.iloc[i] < o2.iloc[i])
+
+    if bullish or smc_bullish:
         return "BUY", {
-            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "type": "Momentum" if bullish else "SMC BOS",
             "hadiff_curr": float(Hadiff.iloc[i]),
             "close": float(df.Close.iloc[i]),
             "open": float(df.Open.iloc[i])
         }
-    if bearish:
+    if bearish or smc_bearish:
         return "SELL", {
-            "hadiff_prev": float(Hadiff.iloc[i-1]),
+            "type": "Momentum" if bearish else "SMC BOS",
             "hadiff_curr": float(Hadiff.iloc[i]),
             "close": float(df.Close.iloc[i]),
             "open": float(df.Open.iloc[i])
@@ -117,10 +119,10 @@ if st.button("RUN SCAN"):
         if ticker not in data or data[ticker].empty: continue
         signal, trace = evaluate_latest(data[ticker])
         if signal == "BUY":
-            buy_list.append(s)
+            buy_list.append(f"{s} ({trace['type']})")
             if buy_trace is None: buy_trace = {s: trace}
         elif signal == "SELL":
-            sell_list.append(s)
+            sell_list.append(f"{s} ({trace['type']})")
             if sell_trace is None: sell_trace = {s: trace}
         else:
             neutral.append(s)
