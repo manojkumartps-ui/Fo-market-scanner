@@ -13,28 +13,178 @@ st.title("F&O Scanner — Momentum (SHA) + Structure (SMC)")
 LEN1 = 3
 LEN2 = 2
 SMC_LOOKBACK = 10
-SCAN_LIMIT = 100
+MAX_SYMBOLS = 100
 
-# ================= F&O FETCH =================
+# ================= FETCH F&O SYMBOLS =================
 @st.cache_data(ttl=86400)
 def get_fno():
-    """
-    Fetch F&O stock symbols from NSE official archive CSV.
-    No fallback. Fails loudly if request fails.
-    """
     url = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 
-    try:
-        with st.spinner("Fetching F&O symbols from NSE..."):
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
 
-            df = pd.read_csv(StringIO(response.text))
+    df = pd.read_csv(StringIO(response.text))
+    df.columns = [col.strip() for col in df.columns]
 
-            # Clean columns
-            df.columns = [col.strip() for col in df.columns]
+    if "SYMBOL" not in df.columns:
+        raise ValueError("SYMBOL column not found")
 
-            if "SYMBOL" not in df.columns:
+    symbols = df["SYMBOL"].dropna().unique().tolist()
+
+    # Remove index symbols
+    exclude = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+    symbols = [s for s in symbols if s not in exclude]
+
+    if len(symbols) == 0:
+        raise ValueError("No F&O symbols found")
+
+    return sorted(symbols)
+
+# ================= LOAD DATA =================
+@st.cache_data(ttl=300)
+def load_data(symbols):
+    tickers = [s + ".NS" for s in symbols[:MAX_SYMBOLS]]
+
+    data = yf.download(
+        tickers=tickers,
+        period="6mo",
+        interval="1d",
+        group_by="ticker",
+        threads=True,
+        progress=False
+    )
+
+    return data
+
+# ================= SIGNAL ENGINE =================
+def evaluate_dual(df):
+    df = df.dropna().copy()
+
+    if len(df) < 20:
+        return "NEUTRAL", None
+
+    # Heikin Ashi
+    ha_close = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
+
+    ha_open = np.zeros(len(df))
+    ha_open[0] = (df["Open"].iloc[0] + df["Close"].iloc[0]) / 2
+
+    for i in range(1, len(df)):
+        ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
+
+    # Smoothing
+    o2 = pd.Series(ha_open).ewm(span=LEN1, adjust=False).mean()
+    o2 = o2.ewm(span=LEN2, adjust=False).mean()
+
+    c2 = ha_close.ewm(span=LEN1, adjust=False).mean()
+    c2 = c2.ewm(span=LEN2, adjust=False).mean()
+
+    hadiff = o2 - c2
+    i = len(df) - 1
+
+    # SHA signals
+    sha_buy = (
+        hadiff.iloc[i-1] <= 0 and
+        hadiff.iloc[i] > 0 and
+        df["Close"].iloc[i] > df["Open"].iloc[i]
+    )
+
+    sha_sell = (
+        hadiff.iloc[i-1] >= 0 and
+        hadiff.iloc[i] < 0 and
+        df["Close"].iloc[i] < df["Open"].iloc[i]
+    )
+
+    # SMC signals
+    swing_high = df["High"].iloc[-SMC_LOOKBACK:-1].max()
+    swing_low = df["Low"].iloc[-SMC_LOOKBACK:-1].min()
+
+    smc_buy = (
+        df["Close"].iloc[i] > swing_high and
+        c2.iloc[i] > o2.iloc[i]
+    )
+
+    smc_sell = (
+        df["Close"].iloc[i] < swing_low and
+        c2.iloc[i] < o2.iloc[i]
+    )
+
+    # Final logic
+    if sha_buy and smc_buy:
+        return "BUY", {"Type": "STRONG"}
+    elif sha_sell and smc_sell:
+        return "SELL", {"Type": "STRONG"}
+    elif sha_buy:
+        return "BUY", {"Type": "Momentum"}
+    elif smc_buy:
+        return "BUY", {"Type": "SMC"}
+    elif sha_sell:
+        return "SELL", {"Type": "Momentum"}
+    elif smc_sell:
+        return "SELL", {"Type": "SMC"}
+
+    return "NEUTRAL", None
+
+# ================= INITIAL LOAD =================
+try:
+    with st.spinner("Fetching F&O symbols..."):
+        symbols = get_fno()
+
+    st.success(f"Loaded {len(symbols)} F&O symbols")
+
+    with st.spinner("Loading market data..."):
+        data = load_data(symbols)
+
+except Exception as e:
+    st.error(f"Startup failed: {e}")
+    st.stop()
+
+# ================= RUN SCAN =================
+if st.button("RUN SCAN"):
+
+    buy_list = []
+    sell_list = []
+
+    for symbol in symbols[:MAX_SYMBOLS]:
+        ticker = symbol + ".NS"
+
+        try:
+            if ticker not in data.columns.levels[0]:
+                continue
+
+            df = data[ticker].dropna()
+
+            signal, info = evaluate_dual(df)
+
+            if signal == "BUY":
+                buy_list.append({
+                    "Symbol": symbol,
+                    "Type": info["Type"]
+                })
+
+            elif signal == "SELL":
+                sell_list.append({
+                    "Symbol": symbol,
+                    "Type": info["Type"]
+                })
+
+        except Exception:
+            continue
+
+    # ================= DISPLAY =================
+    st.subheader(f"🟢 BUY Candidates ({len(buy_list)})")
+
+    if buy_list:
+        st.dataframe(pd.DataFrame(buy_list), use_container_width=True)
+    else:
+        st.write("No BUY signals")
+
+    st.subheader(f"🔴 SELL Candidates ({len(sell_list)})")
+
+    if sell_list:
+        st.dataframe(pd.DataFrame(sell_list), use_container_width=True)
+    else:
+        st.write("No SELL signals")            if "SYMBOL" not in df.columns:
                 raise ValueError("SYMBOL column missing in NSE CSV")
 
             symbols = df["SYMBOL"].dropna().astype(str).unique().tolist()
