@@ -1,4 +1,4 @@
-NSE Primary Blocked (Error 403).        
+#NSE Primary Blocked (Error 403).        
         # Step 2: Fetch the CSV directly from the reports directory
         response = session.get(url_csv, headers=headers, timeout=15)
         
