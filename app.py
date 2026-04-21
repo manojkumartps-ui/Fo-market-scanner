@@ -1,40 +1,4 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import requests
-import io
-import time
-
-st.set_page_config(layout="wide")
-st.title("F&O Scanner — Momentum (SHA) + Structure (SMC)")
-
-# ================= SETTINGS =================
-LEN1 = 3  
-LEN2 = 2  
-SMC_LOOKBACK = 10 
-
-# ================= OFFICIAL NSE SOURCE (DIRECT CSV) =================
-
-@st.cache_data(ttl=86400)
-def get_fno():
-    """Fetches the official symbol list directly from NSE's public CSV reports."""
-    # Official URL for securities available for trading (Capital Market)
-    url_csv = "https://nseindia.com"
-    url_home = "https://www.nseindia.com"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/csv",
-        "Referer": "https://www.nseindia.com/market-data/securities-available-for-trading"
-    }
-
-    session = requests.Session()
-    try:
-        # Step 1: Visit home page to gather mandatory cookies legitimately
-        session.get(url_home, headers=headers, timeout=10)
-        time.sleep(1)
-        
+NSE Primary Blocked (Error 403).        
         # Step 2: Fetch the CSV directly from the reports directory
         response = session.get(url_csv, headers=headers, timeout=15)
         
