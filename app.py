@@ -1,10 +1,13 @@
+import streamlit as st
 import requests
 import pandas as pd
 import yfinance as yf
 import time
 
+st.title("📊 NSE F&O OHLC Downloader")
+
 # -----------------------------
-# STEP 1: Get F&O stock list
+# STEP 1: Get F&O stocks
 # -----------------------------
 def get_fno_stocks():
     try:
@@ -16,80 +19,75 @@ def get_fno_stocks():
             "Referer": "https://www.nseindia.com/"
         }
 
-        # जरूरी: cookie set करना
         session.get("https://www.nseindia.com", headers=headers, timeout=5)
 
         url = "https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O"
         res = session.get(url, headers=headers, timeout=5)
 
         data = res.json()
-
         symbols = [item['symbol'] for item in data['data']]
 
-        stocks = [s + ".NS" for s in symbols]
+        return [s + ".NS" for s in symbols]
 
-        print(f"Fetched {len(stocks)} F&O stocks")
-
-        return stocks
-
-    except Exception as e:
-        print("NSE failed, using fallback list ❌")
-
-        # fallback (so app never crashes)
-        return [
-            "RELIANCE.NS", "TCS.NS", "INFY.NS",
-            "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS"
-        ]
+    except:
+        st.warning("NSE blocked request → using fallback list")
+        return ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"]
 
 
 # -----------------------------
 # STEP 2: Fetch OHLC
 # -----------------------------
-def fetch_ohlc(stocks):
+def fetch_data(stocks):
     all_data = {}
 
-    for stock in stocks:
+    progress = st.progress(0)
+
+    for i, stock in enumerate(stocks):
         try:
-            df = yf.download(
-                stock,
-                period="5mo",
-                interval="1d",
-                progress=False
-            )
+            df = yf.download(stock, period="5mo", interval="1d", progress=False)
 
             if not df.empty:
                 all_data[stock] = df[['Open', 'High', 'Low', 'Close']]
-                print(f"{stock} ✅")
 
-            time.sleep(0.2)  # avoid rate limit
+        except:
+            pass
 
-        except Exception as e:
-            print(f"{stock} ❌")
+        progress.progress((i + 1) / len(stocks))
+
+        time.sleep(0.1)
 
     return all_data
 
 
 # -----------------------------
-# STEP 3: Run everything
+# RUN BUTTON
 # -----------------------------
-def main():
+if st.button("🚀 Run Fetch"):
+
     stocks = get_fno_stocks()
 
-    data = fetch_ohlc(stocks)
+    st.write(f"Total F&O Stocks: {len(stocks)}")
+
+    data = fetch_data(stocks)
 
     if len(data) == 0:
-        print("No data fetched ❌")
-        return
+        st.error("No data fetched")
+        st.stop()
 
     final_df = pd.concat(data, axis=1)
 
-    final_df.to_csv("fno_ohlc_5months.csv")
+    st.success("Data ready!")
 
-    print("DONE 🚀 File saved: fno_ohlc_5months.csv")
+    st.dataframe(final_df.head())
 
+    # -----------------------------
+    # DOWNLOAD BUTTON (IMPORTANT)
+    # -----------------------------
+    csv = final_df.to_csv().encode('utf-8')
 
-# -----------------------------
-# ENTRY POINT
-# -----------------------------
-if __name__ == "__main__":
-    main()
+    st.download_button(
+        label="📥 Download OHLC CSV",
+        data=csv,
+        file_name="fno_ohlc_5months.csv",
+        mime="text/csv"
+    )
