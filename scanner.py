@@ -2,6 +2,7 @@ import pandas as pd
 
 FILE = "data/nse_fno_ohlc.csv"
 
+
 # -----------------------------
 # Heikin Ashi
 # -----------------------------
@@ -13,7 +14,7 @@ def heikin_ashi(df):
     ha_open = [(df["Open"].iloc[0] + df["Close"].iloc[0]) / 2]
 
     for i in range(1, len(df)):
-        ha_open.append((ha_open[i-1] + ha["HA_Close"].iloc[i-1]) / 2)
+        ha_open.append((ha_open[i - 1] + ha["HA_Close"].iloc[i - 1]) / 2)
 
     ha["HA_Open"] = ha_open
     return ha
@@ -72,68 +73,35 @@ def check_stock(df):
 
 
 # -----------------------------
-# FIXED CSV LOADER (your format)
-# -----------------------------
-def load_data():
-
-    raw = pd.read_csv(FILE, header=None)
-
-    tickers = raw.iloc[0]
-    fields = raw.iloc[1]
-
-    df = raw.iloc[3:].copy()
-
-    cols = []
-
-    for i in range(len(tickers)):
-        if i == 0:
-            cols.append("Date")
-        else:
-            cols.append(f"{tickers[i]}_{fields[i]}")
-
-    df.columns = cols
-
-    # -------- FIXED DATE PARSING --------
-    df["Date"] = pd.to_datetime(
-        df["Date"].astype(str).str.strip(),
-        format="%d-%m-%Y",
-        errors="coerce"
-    )
-
-    # Debug: show bad rows
-    print("NaT Dates:", df["Date"].isna().sum())
-
-    df = df.dropna(subset=["Date"])
-    df = df.set_index("Date")
-    df = df.sort_index()
-
-    df = df.apply(pd.to_numeric, errors="coerce")
-
-    return df
-
-
-# -----------------------------
-# MAIN SCANNER
+# Main Scanner
 # -----------------------------
 def run_scanner():
 
-    data = load_data()
+    # read multi-index CSV
+    raw = pd.read_csv(FILE, header=[0, 1], index_col=0)
+
+    # fix index (dates)
+    raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
+    raw = raw[~raw.index.isna()]
+    raw = raw.sort_index()
 
     results = []
-    stocks = set([c.split("_")[0] for c in data.columns if "_" in c])
 
-    print("Total stocks found:", len(stocks))
+    tickers = raw.columns.levels[0]
 
-    for stock in stocks:
-
+    for stock in tickers:
         try:
-            df = data[[c for c in data.columns if c.startswith(stock + "_")]].copy()
-            df.columns = [c.split("_")[1] for c in df.columns]
+            df = raw[stock].copy()
 
-            df = df.dropna(subset=["Open", "High", "Low", "Close"])
+            # keep only OHLC
+            df = df[["Open", "High", "Low", "Close"]]
+
+            # numeric conversion
+            for c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+            df = df.dropna()
             df = df.sort_index()
-
-            print(f"{stock}: rows = {len(df)}")
 
             if len(df) < 30:
                 continue
@@ -146,19 +114,16 @@ def run_scanner():
                 results.append(stock)
 
         except Exception as e:
-            print(f"Error in {stock}: {e}")
-            continue
+            print(f"Error {stock}: {e}")
 
-    print("\n======================")
-    print("MATCHING STOCKS")
-    print("======================")
+    print("\nMatching Stocks:")
     print(results)
 
     pd.Series(results).to_csv("data/signals.csv", index=False)
 
 
 # -----------------------------
-# RUN
+# Run
 # -----------------------------
 if __name__ == "__main__":
     run_scanner()
