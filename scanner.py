@@ -16,7 +16,6 @@ def heikin_ashi(df):
         ha_open.append((ha_open[i-1] + ha["HA_Close"].iloc[i-1]) / 2)
 
     ha["HA_Open"] = ha_open
-
     return ha
 
 
@@ -47,12 +46,12 @@ def check_stock(df):
         "Close": "last"
     }).dropna()
 
+    if len(weekly) < 5:
+        return False
+
     ha_w = heikin_ashi(weekly)
     weekly = pd.concat([weekly, ha_w], axis=1)
     weekly = add_ema(weekly)
-
-    if len(weekly) < 5:
-        return False
 
     w_latest = weekly.iloc[-1]
     w_3 = weekly.iloc[-4]
@@ -73,7 +72,7 @@ def check_stock(df):
 
 
 # -----------------------------
-# FIXED CSV READER (your format)
+# FIXED CSV LOADER (your format)
 # -----------------------------
 def load_data():
 
@@ -94,7 +93,16 @@ def load_data():
 
     df.columns = cols
 
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    # -------- FIXED DATE PARSING --------
+    df["Date"] = pd.to_datetime(
+        df["Date"].astype(str).str.strip(),
+        format="%d-%m-%Y",
+        errors="coerce"
+    )
+
+    # Debug: show bad rows
+    print("NaT Dates:", df["Date"].isna().sum())
+
     df = df.dropna(subset=["Date"])
     df = df.set_index("Date")
     df = df.sort_index()
@@ -105,15 +113,16 @@ def load_data():
 
 
 # -----------------------------
-# MAIN
+# MAIN SCANNER
 # -----------------------------
 def run_scanner():
 
     data = load_data()
 
     results = []
-
     stocks = set([c.split("_")[0] for c in data.columns if "_" in c])
+
+    print("Total stocks found:", len(stocks))
 
     for stock in stocks:
 
@@ -123,6 +132,8 @@ def run_scanner():
 
             df = df.dropna(subset=["Open", "High", "Low", "Close"])
             df = df.sort_index()
+
+            print(f"{stock}: rows = {len(df)}")
 
             if len(df) < 30:
                 continue
@@ -138,7 +149,9 @@ def run_scanner():
             print(f"Error in {stock}: {e}")
             continue
 
-    print("\nMatching Stocks:")
+    print("\n======================")
+    print("MATCHING STOCKS")
+    print("======================")
     print(results)
 
     pd.Series(results).to_csv("data/signals.csv", index=False)
