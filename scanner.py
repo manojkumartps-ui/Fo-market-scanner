@@ -7,9 +7,18 @@ FILE = "data/nse_fno_ohlc.csv"
 # -----------------------------
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
+
+    # HA Close
     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
-    ha["HA_Open"] = (df["Open"].shift(1) + df["Close"].shift(1)) / 2
-    ha.iloc[0, ha.columns.get_loc("HA_Open")] = df["Open"].iloc[0]
+
+    # HA Open (iterative)
+    ha_open = [(df["Open"].iloc[0] + df["Close"].iloc[0]) / 2]
+
+    for i in range(1, len(df)):
+        ha_open.append((ha_open[i-1] + ha["HA_Close"].iloc[i-1]) / 2)
+
+    ha["HA_Open"] = ha_open
+
     return ha
 
 
@@ -17,8 +26,8 @@ def heikin_ashi(df):
 # EMA Calculation
 # -----------------------------
 def add_ema(df):
-    df["EMA_HA_Open"] = df["HA_Open"].ewm(span=5).mean()
-    df["EMA_HA_Close"] = df["HA_Close"].ewm(span=5).mean()
+    df["EMA_HA_Open"] = df["HA_Open"].ewm(span=5, adjust=False).mean()
+    df["EMA_HA_Close"] = df["HA_Close"].ewm(span=5, adjust=False).mean()
     return df
 
 
@@ -36,12 +45,12 @@ def check_stock(df):
     d_3 = df.iloc[-4]
 
     # --- Weekly ---
-    weekly = df.resample("W").agg({
+    weekly = df.resample("W-FRI").agg({
         "Open": "first",
         "High": "max",
         "Low": "min",
         "Close": "last"
-    })
+    }).dropna()
 
     ha_w = heikin_ashi(weekly)
     weekly = pd.concat([weekly, ha_w], axis=1)
@@ -53,14 +62,14 @@ def check_stock(df):
     w_latest = weekly.iloc[-1]
     w_3 = weekly.iloc[-4]
 
-    # --- All Conditions ---
+    # --- Conditions ---
     return (
         # Daily
         latest["Close"] > latest["Open"] and
         latest["Close"] > latest["EMA_HA_Close"] and
         latest["EMA_HA_Open"] < latest["EMA_HA_Close"] and
 
-        # 3 days ago
+        # 3 days ago (bearish)
         d_3["EMA_HA_Open"] > d_3["EMA_HA_Close"] and
 
         # Weekly
@@ -68,7 +77,7 @@ def check_stock(df):
         w_latest["Close"] > w_latest["EMA_HA_Close"] and
         w_latest["EMA_HA_Open"] < w_latest["EMA_HA_Close"] and
 
-        # 3 weeks ago
+        # 3 weeks ago (bearish)
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
@@ -94,13 +103,14 @@ def run_scanner():
             if check_stock(df):
                 results.append(stock)
 
-        except Exception:
+        except Exception as e:
+            print(f"Error in {stock}: {e}")
             continue
 
     print("\nMatching Stocks:")
     print(results)
 
-    # Optional: save results
+    # Save results
     pd.Series(results).to_csv("data/signals.csv", index=False)
 
 
