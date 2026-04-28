@@ -62,20 +62,16 @@ def check_stock(df):
     w_3 = weekly.iloc[-4]
 
     return (
-        # Daily
         latest["Close"] > latest["Open"] and
         latest["Close"] > latest["EMA_HA_Close"] and
         latest["EMA_HA_Open"] < latest["EMA_HA_Close"] and
 
-        # 3 days ago bearish
         d_3["EMA_HA_Open"] > d_3["EMA_HA_Close"] and
 
-        # Weekly
         w_latest["Close"] > w_latest["Open"] and
         w_latest["Close"] > w_latest["EMA_HA_Close"] and
         w_latest["EMA_HA_Open"] < w_latest["EMA_HA_Close"] and
 
-        # 3 weeks ago bearish
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
@@ -85,7 +81,7 @@ def check_stock(df):
 # -----------------------------
 def run_scanner():
 
-    data = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=True)
+    data = pd.read_csv(FILE, header=[0, 1], index_col=0)
 
     results = []
 
@@ -94,7 +90,13 @@ def run_scanner():
             df = data[stock].copy()
 
             # -----------------------------
-            # ✅ FIX: Convert OHLC to numeric
+            # ✅ FIX 1: Force datetime index
+            # -----------------------------
+            df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df[~df.index.isna()]
+
+            # -----------------------------
+            # ✅ FIX 2: Convert OHLC to numeric
             # -----------------------------
             cols = ["Open", "High", "Low", "Close"]
 
@@ -103,7 +105,9 @@ def run_scanner():
 
             df = df.dropna(subset=cols)
 
-            # Skip if too little data after cleaning
+            # Ensure sorted index (important for resample)
+            df = df.sort_index()
+
             if len(df) < 30:
                 continue
 
@@ -124,7 +128,6 @@ def run_scanner():
     print("\nMatching Stocks:")
     print(results)
 
-    # Save results
     pd.Series(results).to_csv("data/signals.csv", index=False)
 
 
