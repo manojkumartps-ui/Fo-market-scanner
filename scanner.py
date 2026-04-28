@@ -36,7 +36,6 @@ def add_ema(df):
 # -----------------------------
 def check_stock(df):
 
-    # Need enough data
     if len(df) < 30:
         return False
 
@@ -62,14 +61,13 @@ def check_stock(df):
     w_latest = weekly.iloc[-1]
     w_3 = weekly.iloc[-4]
 
-    # --- Conditions ---
     return (
         # Daily
         latest["Close"] > latest["Open"] and
         latest["Close"] > latest["EMA_HA_Close"] and
         latest["EMA_HA_Open"] < latest["EMA_HA_Close"] and
 
-        # 3 days ago (bearish)
+        # 3 days ago bearish
         d_3["EMA_HA_Open"] > d_3["EMA_HA_Close"] and
 
         # Weekly
@@ -77,7 +75,7 @@ def check_stock(df):
         w_latest["Close"] > w_latest["EMA_HA_Close"] and
         w_latest["EMA_HA_Open"] < w_latest["EMA_HA_Close"] and
 
-        # 3 weeks ago (bearish)
+        # 3 weeks ago bearish
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
@@ -93,9 +91,25 @@ def run_scanner():
 
     for stock in data.columns.levels[0]:
         try:
-            df = data[stock].dropna().copy()
+            df = data[stock].copy()
 
+            # -----------------------------
+            # ✅ FIX: Convert OHLC to numeric
+            # -----------------------------
+            cols = ["Open", "High", "Low", "Close"]
+
+            for col in cols:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = df.dropna(subset=cols)
+
+            # Skip if too little data after cleaning
+            if len(df) < 30:
+                continue
+
+            # -----------------------------
             # Add HA + EMA
+            # -----------------------------
             ha = heikin_ashi(df)
             df = pd.concat([df, ha], axis=1)
             df = add_ema(df)
