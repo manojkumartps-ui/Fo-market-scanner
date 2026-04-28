@@ -3,15 +3,13 @@ import pandas as pd
 FILE = "data/nse_fno_ohlc.csv"
 
 # -----------------------------
-# Heikin Ashi Calculation
+# Heikin Ashi
 # -----------------------------
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
 
-    # HA Close
     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
 
-    # HA Open (iterative)
     ha_open = [(df["Open"].iloc[0] + df["Close"].iloc[0]) / 2]
 
     for i in range(1, len(df)):
@@ -23,7 +21,7 @@ def heikin_ashi(df):
 
 
 # -----------------------------
-# EMA Calculation
+# EMA
 # -----------------------------
 def add_ema(df):
     df["EMA_HA_Open"] = df["HA_Open"].ewm(span=5, adjust=False).mean()
@@ -32,18 +30,16 @@ def add_ema(df):
 
 
 # -----------------------------
-# Strategy Conditions
+# Strategy
 # -----------------------------
 def check_stock(df):
 
     if len(df) < 30:
         return False
 
-    # --- Daily ---
     latest = df.iloc[-1]
     d_3 = df.iloc[-4]
 
-    # --- Weekly ---
     weekly = df.resample("W-FRI").agg({
         "Open": "first",
         "High": "max",
@@ -77,43 +73,60 @@ def check_stock(df):
 
 
 # -----------------------------
-# Main Scanner
+# FIXED CSV READER (your format)
+# -----------------------------
+def load_data():
+
+    raw = pd.read_csv(FILE, header=None)
+
+    tickers = raw.iloc[0]
+    fields = raw.iloc[1]
+
+    df = raw.iloc[3:].copy()
+
+    cols = []
+
+    for i in range(len(tickers)):
+        if i == 0:
+            cols.append("Date")
+        else:
+            cols.append(f"{tickers[i]}_{fields[i]}")
+
+    df.columns = cols
+
+    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["Date"])
+    df = df.set_index("Date")
+    df = df.sort_index()
+
+    df = df.apply(pd.to_numeric, errors="coerce")
+
+    return df
+
+
+# -----------------------------
+# MAIN
 # -----------------------------
 def run_scanner():
 
-    data = pd.read_csv(FILE, header=[0, 1], index_col=0)
+    data = load_data()
 
     results = []
 
-    for stock in data.columns.levels[0]:
+    stocks = set([c.split("_")[0] for c in data.columns if "_" in c])
+
+    for stock in stocks:
+
         try:
-            df = data[stock].copy()
+            df = data[[c for c in data.columns if c.startswith(stock + "_")]].copy()
+            df.columns = [c.split("_")[1] for c in df.columns]
 
-            # -----------------------------
-            # ✅ FIX 1: Force datetime index
-            # -----------------------------
-            df.index = pd.to_datetime(df.index, errors="coerce")
-            df = df[~df.index.isna()]
-
-            # -----------------------------
-            # ✅ FIX 2: Convert OHLC to numeric
-            # -----------------------------
-            cols = ["Open", "High", "Low", "Close"]
-
-            for col in cols:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            df = df.dropna(subset=cols)
-
-            # Ensure sorted index (important for resample)
+            df = df.dropna(subset=["Open", "High", "Low", "Close"])
             df = df.sort_index()
 
             if len(df) < 30:
                 continue
 
-            # -----------------------------
-            # Add HA + EMA
-            # -----------------------------
             ha = heikin_ashi(df)
             df = pd.concat([df, ha], axis=1)
             df = add_ema(df)
@@ -132,7 +145,7 @@ def run_scanner():
 
 
 # -----------------------------
-# Run
+# RUN
 # -----------------------------
 if __name__ == "__main__":
     run_scanner()
