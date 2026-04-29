@@ -3,7 +3,9 @@ import numpy as np
 
 FILE = "data/nse_fno_ohlc.csv"
 
-# --- YOUR ORIGINAL LOGIC REMAINS UNTOUCHED ---
+# -----------------------------
+# YOUR ORIGINAL LOGIC - UNTOUCHED
+# -----------------------------
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
@@ -36,7 +38,7 @@ def check_stock(df, stock_name, debug=False):
     w_latest = weekly.iloc[-1]
     w_3 = weekly.iloc[-4]
 
-    # Conditions with formatted labels and actual values
+    # Combined conditions for validation
     conditions = [
         (f"Daily Price > Open ({latest['Close']:.2f} > {latest['Open']:.2f})", latest["Close"] > latest["Open"]),
         (f"Daily Close > EMA_HA_Close ({latest['Close']:.2f} > {latest['EMA_HA_Close']:.2f})", latest["Close"] > latest["EMA_HA_Close"]),
@@ -48,23 +50,30 @@ def check_stock(df, stock_name, debug=False):
         (f"Weekly Lookback w-3 Bearish ({w_3['EMA_HA_Open']:.2f} > {w_3['EMA_HA_Close']:.2f})", w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"])
     ]
 
-    if debug:
+    is_match = all(val for desc, val in conditions)
+    if debug or is_match:
         print(f"\n--- LOGIC TRACE: {stock_name} ---")
         for desc, val in conditions:
             print(f"{'[PASS]' if val else '[FAIL]'} {desc}")
-    
-    return all(val for desc, val in conditions)
+    return is_match
 
+# -----------------------------
+# MAIN SCANNER
+# -----------------------------
 def run_scanner():
     try:
+        # Load MultiIndex headers (Row 1=Ticker, Row 2=Metric)
         raw = pd.read_csv(FILE, header=[1, 2], index_col=0)
         raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
         raw = raw[raw.index.notna()].sort_index()
-        if "Open" in raw.columns.levels[0]: raw.columns = raw.columns.swaplevel(0, 1)
         
-        tickers = raw.columns.levels[0].unique()
+        # Ensure Ticker is Level 0
+        if "Open" in raw.columns.levels[0]:
+            raw.columns = raw.columns.swaplevel(0, 1)
+        
+        tickers = raw.columns.get_level_values(0).unique()
         results = []
-        first_check = True
+        processed_count = 0
 
         for stock in tickers:
             if "Unnamed" in str(stock) or not stock: continue
@@ -72,20 +81,25 @@ def run_scanner():
                 df = raw[stock].copy()
                 df.columns = [str(c).strip().capitalize() for c in df.columns]
                 df = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors='coerce').dropna()
+                
                 if len(df) < 30: continue
                 
                 df = pd.concat([df, heikin_ashi(df)], axis=1)
                 df = add_ema(df)
 
-                if check_stock(df, stock, debug=first_check):
+                # Debug the first 3 stocks to confirm data flow
+                show_trace = True if processed_count < 3 else False
+                if check_stock(df, stock, debug=show_trace):
                     results.append(stock)
-                first_check = False
+                
+                processed_count += 1
             except: continue
 
-        print(f"\nMatching Stocks: {results}")
+        print(f"\nFINAL Matching Stocks: {results}")
         pd.Series(results).to_csv("data/signals.csv", index=False)
+
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Scanner Error: {e}")
 
 if __name__ == "__main__":
     run_scanner()
