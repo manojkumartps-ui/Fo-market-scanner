@@ -3,7 +3,7 @@ import numpy as np
 
 FILE = "data/nse_fno_ohlc.csv"
 
-# --- YOUR ORIGINAL LOGIC REMAINS UNTOUCHED ---
+# --- YOUR ORIGINAL LOGIC (UNCHANGED) ---
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
@@ -40,23 +40,30 @@ def check_stock(df):
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
-# --- UPDATED SCANNER TO FIX HEADER SWAP ---
+# --- SCANNER WITH DEBUGGING ---
 def run_scanner():
     try:
-        # Load the CSV. Based on debug, Tickers are Level 0, Metrics are Level 1
+        # Load CSV using rows 1 and 2 as headers (skipping row 0 'Price')
         raw = pd.read_csv(FILE, header=[1, 2], index_col=0)
         
         # Clean Date Index
         raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
         raw = raw[raw.index.notna()].sort_index()
 
-        # IMPORTANT: Based on your Debug Window, we need to ensure 
-        # Tickers are Level 0 and Metrics (Open/High/Low/Close) are Level 1
+        # --- RE-ADDED DEBUG WINDOW ---
+        print("\n--- DEBUG: CSV STRUCTURE ---")
+        print(f"Column Levels: {raw.columns.names}")
+        print(f"Level 0 sample: {list(raw.columns.levels[0])[:3]}")
+        print(f"Level 1 sample: {list(raw.columns.levels[1])[:3]}")
+        
+        # If Level 0 is 'Open/High/Low', we MUST swap them
         if "Open" in raw.columns.levels[0]:
+            print("Action: Swapping Levels to put Tickers on top...")
             raw.columns = raw.columns.swaplevel(0, 1)
         
         results = []
-        tickers = raw.columns.levels[0].unique()
+        tickers = raw.columns.get_level_values(0).unique()
+        print(f"Total Tickers found: {len(tickers)}")
 
         for stock in tickers:
             if "Unnamed" in str(stock) or not stock: continue
@@ -64,21 +71,20 @@ def run_scanner():
                 # Extract OHLC for the stock
                 df = raw[stock].copy()
                 
-                # Standardize column names for your logic
+                # Standardize column names
                 df.columns = [str(c).strip().capitalize() for c in df.columns]
                 df = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors='coerce').dropna()
 
                 if len(df) < 30: continue
                 
-                # Indicators
-                ha = heikin_ashi(df)
-                df = pd.concat([df, ha], axis=1)
+                # Apply indicators and check strategy
+                df = pd.concat([df, heikin_ashi(df)], axis=1)
                 df = add_ema(df)
 
-                # Strategy Check
                 if check_stock(df):
                     results.append(stock)
-            except: continue
+            except:
+                continue
 
         print(f"\nMatching Stocks: {results}")
         pd.Series(results).to_csv("data/signals.csv", index=False)
