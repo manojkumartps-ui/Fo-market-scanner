@@ -4,7 +4,7 @@ import numpy as np
 FILE = "data/nse_fno_ohlc.csv"
 
 # -----------------------------
-# Heikin Ashi - YOUR ORIGINAL LOGIC
+# YOUR ORIGINAL HEIKIN ASHI LOGIC
 # -----------------------------
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
@@ -16,7 +16,7 @@ def heikin_ashi(df):
     return ha
 
 # -----------------------------
-# EMA - YOUR ORIGINAL LOGIC
+# YOUR ORIGINAL EMA LOGIC
 # -----------------------------
 def add_ema(df):
     df["EMA_HA_Open"] = df["HA_Open"].ewm(span=5, adjust=False).mean()
@@ -24,7 +24,7 @@ def add_ema(df):
     return df
 
 # -----------------------------
-# Strategy - YOUR ORIGINAL LOGIC
+# YOUR ORIGINAL STRATEGY LOGIC
 # -----------------------------
 def check_stock(df):
     if len(df) < 30:
@@ -54,64 +54,67 @@ def check_stock(df):
         latest["Close"] > latest["Open"] and
         latest["Close"] > latest["EMA_HA_Close"] and
         latest["EMA_HA_Open"] < latest["EMA_HA_Close"] and
-
         d_3["EMA_HA_Open"] > d_3["EMA_HA_Close"] and
-
         w_latest["Close"] > w_latest["Open"] and
         w_latest["Close"] > w_latest["EMA_HA_Close"] and
         w_latest["EMA_HA_Open"] < w_latest["EMA_HA_Close"] and
-
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
 # -----------------------------
-# Main Scanner - UPDATED PARSING FOR YOUR CSV
+# UPDATED SCANNER (Fixes empty list)
 # -----------------------------
 def run_scanner():
-    # 1. Skip the 'Price' row (Row 0), use Ticker (Row 1) and Metric (Row 2) as header
-    # This aligns the CSV structure shown in your image
-    raw = pd.read_csv(FILE, header=[1, 2], index_col=0, skiprows=[0])
+    try:
+        # Load skipping the 'Price' row (0), using Ticker (1) and Metric (2)
+        # Based on your image, this is the most reliable way to align headers
+        raw = pd.read_csv(FILE, header=[1, 2], index_col=0, skiprows=[0])
 
-    # 2. Fix the Date Warning & clean the index
-    # We use format='mixed' or dayfirst to handle the Excel/CSV date strings
-    raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
-    raw = raw[~raw.index.isna()]
-    raw = raw.sort_index()
+        # Clean the date index and remove the "Date" row text seen in your image
+        raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
+        raw = raw[raw.index.notna()].sort_index()
 
-    results = []
-    # Tickers are in the first level of the multi-index columns
-    tickers = raw.columns.levels[0]
+        results = []
+        # Get unique tickers from the first level of the MultiIndex columns
+        tickers = raw.columns.get_level_values(0).unique()
 
-    for stock in tickers:
-        try:
-            df = raw[stock].copy()
-            df = df[["Open", "High", "Low", "Close"]]
-            
-            # Numeric conversion to ensure no string data breaks the logic
-            for c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
+        for stock in tickers:
+            # Skip empty or "Unnamed" ticker names
+            if "Unnamed" in stock or not stock:
+                continue
+                
+            try:
+                # Extract the 4 columns belonging to this ticker
+                df = raw[stock].copy()
+                
+                # Standardize columns to match your strategy expectations
+                df.columns = [c.strip().capitalize() for c in df.columns]
+                df = df[["Open", "High", "Low", "Close"]]
+                
+                # Convert to numbers and drop rows with empty data
+                df = df.apply(pd.to_numeric, errors='coerce').dropna()
 
-            df = df.dropna()
-            df = df.sort_index()
+                if len(df) < 30:
+                    continue
 
-            if len(df) < 30:
+                # Apply indicators
+                ha = heikin_ashi(df)
+                df = pd.concat([df, ha], axis=1)
+                df = add_ema(df)
+
+                # Run your strategy
+                if check_stock(df):
+                    results.append(stock)
+
+            except Exception:
                 continue
 
-            ha = heikin_ashi(df)
-            df = pd.concat([df, ha], axis=1)
-            df = add_ema(df)
+        print("\nMatching Stocks:")
+        print(results)
+        pd.Series(results).to_csv("data/signals.csv", index=False)
 
-            if check_stock(df):
-                results.append(stock)
-
-        except Exception as e:
-            # print(f"Error {stock}: {e}")
-            continue
-
-    print("\nMatching Stocks:")
-    print(results)
-
-    pd.Series(results).to_csv("data/signals.csv", index=False)
+    except Exception as e:
+        print(f"Error loading file: {e}")
 
 if __name__ == "__main__":
     run_scanner()
