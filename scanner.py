@@ -4,7 +4,7 @@ import numpy as np
 FILE = "data/nse_fno_ohlc.csv"
 
 # -----------------------------
-# YOUR ORIGINAL LOGIC (Heikin Ashi, EMA, check_stock) - UNTOUCHED
+# YOUR ORIGINAL LOGIC - UNTOUCHED
 # -----------------------------
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
@@ -25,7 +25,9 @@ def check_stock(df):
     latest = df.iloc[-1]
     d_3 = df.iloc[-4]
     weekly = df.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-    if len(weekly) < 5: return False
+    
+    if len(weekly) < 5: return False # <--- POTENTIAL BOTTLENECK
+    
     ha_w = heikin_ashi(weekly)
     weekly = pd.concat([weekly, ha_w], axis=1)
     weekly = add_ema(weekly)
@@ -43,49 +45,53 @@ def check_stock(df):
     )
 
 # -----------------------------
-# UPDATED SCANNER (Header Level Fix)
+# SCANNER + DEBUG WINDOW
 # -----------------------------
 def run_scanner():
     try:
-        # Load CSV using Ticker/Price levels from your image
+        # Load CSV using Ticker/Price levels
         raw = pd.read_csv(FILE, header=[1, 2], index_col=0)
-        
-        # Clean Date Index
         raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
         raw = raw[raw.index.notna()].sort_index()
 
-        # Based on Debug: Level 0 is 'Price' (OHLC), Level 1 is 'Ticker'
-        # We swap them so 'Ticker' becomes Level 0 for your loop to work
-        raw.columns = raw.columns.swaplevel(0, 1)
+        # Fix Swapped Headers
+        if "Open" in raw.columns.levels[0]:
+            raw.columns = raw.columns.swaplevel(0, 1)
         
-        results = []
-        # Get unique stocks from the new Level 0 (Tickers)
-        tickers = raw.columns.levels[0]
+        tickers = raw.columns.levels[0].unique()
 
+        # --- DEBUG WINDOW ---
+        test_ticker = [t for t in tickers if "Unnamed" not in str(t)][0]
+        print(f"\n--- DEBUG WINDOW: {test_ticker} ---")
+        test_df = raw[test_ticker].copy()
+        test_df.columns = [str(c).strip().capitalize() for c in test_df.columns]
+        test_df = test_df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors='coerce').dropna()
+        print(f"Daily Rows: {len(test_df)}")
+        
+        test_weekly = test_df.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
+        print(f"Weekly Rows generated: {len(test_weekly)}")
+        print(f"Weekly threshold (>=5) met: {len(test_weekly) >= 5}")
+        print("-------------------------------\n")
+
+        results = []
         for stock in tickers:
             if "Unnamed" in str(stock) or not stock: continue
             try:
-                # Select the block for this stock
                 df = raw[stock].copy()
-                
-                # Standardize column names to match your logic
                 df.columns = [str(c).strip().capitalize() for c in df.columns]
                 df = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors='coerce').dropna()
 
                 if len(df) < 30: continue
                 
-                # Apply indicators
                 ha = heikin_ashi(df)
                 df = pd.concat([df, ha], axis=1)
                 df = add_ema(df)
 
-                # Execute your original strategy
                 if check_stock(df):
                     results.append(stock)
-            except:
-                continue
+            except: continue
 
-        print(f"\nMatching Stocks: {results}")
+        print(f"Matching Stocks: {results}")
         pd.Series(results).to_csv("data/signals.csv", index=False)
 
     except Exception as e:
