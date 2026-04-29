@@ -3,9 +3,7 @@ import numpy as np
 
 FILE = "data/nse_fno_ohlc.csv"
 
-# -----------------------------
-# YOUR ORIGINAL LOGIC - UNCHANGED
-# -----------------------------
+# --- YOUR ORIGINAL LOGIC (Heikin Ashi, EMA, check_stock) REMAINS UNTOUCHED ---
 def heikin_ashi(df):
     ha = pd.DataFrame(index=df.index)
     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
@@ -42,56 +40,53 @@ def check_stock(df):
         w_3["EMA_HA_Open"] > w_3["EMA_HA_Close"]
     )
 
-# -----------------------------
-# FIXED LOADING FOR YOUR CSV STRUCTURE
-# -----------------------------
 def run_scanner():
     try:
-        # 1. Load CSV by skipping Row 1 ('Price') and using Row 2 (Ticker) & Row 3 (OHLC) as headers
-        raw = pd.read_csv(FILE, header=[1, 2], index_col=0, skiprows=[0])
-
-        # 2. Fix the Date Index (Removes the 'Date' label row and #######)
-        raw.index = pd.to_datetime(raw.index, errors="coerce", dayfirst=True)
+        # Step 1: Align with your CSV structure (Price/Ticker/Metric)
+        # Using header=[1, 2] ignores the 'Price' label and sets up MultiIndex correctly
+        raw = pd.read_csv(FILE, header=[1, 2], index_col=0)
+        
+        # Step 2: Clean dates and remove the 'Date' row shown in your image
+        raw.index = pd.to_datetime(raw.index, format="%d-%m-%Y", errors="coerce")
         raw = raw[raw.index.notna()].sort_index()
 
         results = []
-        # Get the unique ticker names from Level 0 of the multi-index columns
         tickers = raw.columns.get_level_values(0).unique()
+
+        # --- DEBUG WINDOW FOR FIRST STOCK ---
+        if len(tickers) > 0:
+            test_stock = tickers[0]
+            print(f"\n--- DEBUG WINDOW: Checking {test_stock} ---")
+            test_df = raw[test_stock].copy()
+            test_df.columns = [str(c).strip().capitalize() for c in test_df.columns]
+            print(f"Columns Found: {test_df.columns.tolist()}")
+            test_df = test_df.apply(pd.to_numeric, errors='coerce').dropna()
+            print(f"Data Rows after cleaning: {len(test_df)}")
+            if len(test_df) > 0:
+                print(f"Sample Data:\n{test_df.tail(2)}")
+            print("---------------------------------------\n")
 
         for stock in tickers:
             if "Unnamed" in str(stock) or not stock: continue
-            
             try:
-                # Extract the 4 OHLC columns for the specific ticker
                 df = raw[stock].copy()
-                
-                # Standardize column names for your logic (Open, High, Low, Close)
                 df.columns = [str(c).strip().capitalize() for c in df.columns]
-                df = df[["Open", "High", "Low", "Close"]]
-                
-                # Force numeric data and remove gaps
-                df = df.apply(pd.to_numeric, errors='coerce').dropna()
+                df = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors='coerce').dropna()
 
                 if len(df) < 30: continue
-
-                # Apply your original indicator logic
-                ha = heikin_ashi(df)
-                df = pd.concat([df, ha], axis=1)
+                
+                df = pd.concat([df, heikin_ashi(df)], axis=1)
                 df = add_ema(df)
 
-                # Check your original strategy logic
                 if check_stock(df):
                     results.append(stock)
+            except: continue
 
-            except Exception:
-                continue
-
-        print("\nMatching Stocks:")
-        print(results)
+        print(f"Matching Stocks: {results}")
         pd.Series(results).to_csv("data/signals.csv", index=False)
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Scanner Error: {e}")
 
 if __name__ == "__main__":
     run_scanner()
