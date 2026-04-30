@@ -19,7 +19,7 @@ def get_fno():
     try:
         session = requests.Session()
 
-        # warm-up request (needed for cookies)
+        # warm-up (required for NSE cookies)
         session.get("https://www.nseindia.com", headers=headers, timeout=10)
 
         r = session.get(url, headers=headers, timeout=10)
@@ -38,42 +38,46 @@ def get_fno():
 
 def fetch(stocks):
     if not stocks:
-        print("❌ No stocks received for fetch()")
+        print("❌ No stocks received")
         return pd.DataFrame()
 
-    try:
-        df = yf.download(
-            stocks,
-            period="10d",
-            interval="1d",
-            group_by="ticker",
-            threads=True,
-            progress=False
-        )
+    all_data = {}
+    batch_size = 10   # 🔥 IMPORTANT FIX
 
-        if df.empty:
-            print("❌ yfinance returned empty dataframe")
-            return pd.DataFrame()
+    for i in range(0, len(stocks), batch_size):
+        batch = stocks[i:i + batch_size]
 
-        out = {}
+        try:
+            df = yf.download(
+                batch,
+                period="10d",
+                interval="1d",
+                group_by="ticker",
+                threads=False,   # 🔥 prevents Yahoo blocking
+                progress=False
+            )
 
-        for s in stocks:
-            try:
-                if s in df.columns.levels[0]:
-                    temp = df[s][["Open", "High", "Low", "Close"]].dropna()
-                    if not temp.empty:
-                        out[s] = temp
-            except Exception:
-                continue
+            for s in batch:
+                try:
+                    if s in df.columns.levels[0]:
+                        temp = df[s][["Open", "High", "Low", "Close"]].dropna()
+                        if not temp.empty:
+                            all_data[s] = temp
+                except:
+                    continue
 
-        result = pd.concat(out, axis=1) if out else pd.DataFrame()
+        except Exception as e:
+            print("Batch failed:", batch, e)
 
-        print("Fetched data shape:", result.shape)
-        return result
+        time.sleep(1)  # 🔥 avoid rate limit
 
-    except Exception as e:
-        print("❌ yfinance error:", e)
+    if not all_data:
+        print("❌ No OHLC data collected")
         return pd.DataFrame()
+
+    result = pd.concat(all_data, axis=1)
+    print("Fetched final shape:", result.shape)
+    return result
 
 
 def main():
@@ -84,15 +88,10 @@ def main():
     )
 
     stocks = get_fno()
-
-    if not stocks:
-        print("❌ No FNO stocks fetched → stopping")
-        return
-
     new = fetch(stocks)
 
     if new.empty:
-        print("❌ No new OHLC data → stopping")
+        print("❌ No new data → exit")
         return
 
     if not old.empty:
