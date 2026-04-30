@@ -2,7 +2,7 @@ name: NSE F&O Update
 
 on:
   schedule:
-    - cron: '0 15 * * 1-5'
+    - cron: '0 15 * * 1-5'   # keep your timing
   workflow_dispatch:
 
 jobs:
@@ -10,19 +10,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
-        python-version: 3.10
+        python-version: '3.10'   # IMPORTANT: quoted
 
-    - run: pip install pandas yfinance requests
+    - uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip
+
+    - run: pip install pandas==2.2.2 yfinance==0.2.40 requests==2.31.0
 
     - run: python update.py
 
     - run: |
         git config user.name github-actions
         git config user.email actions@github.com
-        git add .
-        git commit -m "update" || echo "no changes"
+        git add data/nse_fno_ohlc.csv
+        git commit -m "NSE F&O update $(date +'%Y-%m-%d')" || echo "no changes"
         git push
