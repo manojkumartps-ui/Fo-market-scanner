@@ -46,9 +46,16 @@ def fetch(stocks):
         except:
             return None
 
+    # 🔥 FIXED DATE HANDLING
     if os.path.exists(FILE):
-        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=True)
-        start = old.index.max() + timedelta(days=1)
+        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=[0])
+        old.index = pd.to_datetime(old.index, errors="coerce")
+        old = old[~old.index.isna()]
+
+        if old.empty:
+            start = datetime.now() - timedelta(days=5)
+        else:
+            start = old.index.max() + timedelta(days=1)
     else:
         start = datetime.now() - timedelta(days=5)
 
@@ -93,11 +100,12 @@ def fetch(stocks):
 
 
 def main():
-    old = (
-        pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=True)
-        if os.path.exists(FILE)
-        else pd.DataFrame()
-    )
+    if os.path.exists(FILE):
+        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=[0])
+        old.index = pd.to_datetime(old.index, errors="coerce")
+        old = old[~old.index.isna()]
+    else:
+        old = pd.DataFrame()
 
     stocks = get_fno()
     new = fetch(stocks)
