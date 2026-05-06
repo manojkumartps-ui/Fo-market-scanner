@@ -1,8 +1,9 @@
 import pandas as pd
-import yfinance as yf
 import requests
 import os
-import time
+import gzip
+import io
+from datetime import datetime, timedelta
 
 FILE = "data/nse_fno_ohlc.csv"
 
@@ -18,18 +19,12 @@ def get_fno():
 
     try:
         session = requests.Session()
-
-        # warm-up (required for NSE cookies)
         session.get("https://www.nseindia.com", headers=headers, timeout=10)
-
         r = session.get(url, headers=headers, timeout=10)
         r.raise_for_status()
 
         data = r.json()
-        stocks = [x["symbol"] + ".NS" for x in data.get("data", [])]
-
-        print("FNO stocks fetched:", len(stocks))
-        return stocks
+        return [x["symbol"] + ".NS" for x in data.get("data", [])]
 
     except Exception as e:
         print("❌ NSE fetch failed:", e)
@@ -37,47 +32,64 @@ def get_fno():
 
 
 def fetch(stocks):
-    if not stocks:
-        print("❌ No stocks received")
-        return pd.DataFrame()
-
-    all_data = {}
-    batch_size = 10   # 🔥 IMPORTANT FIX
-
-    for i in range(0, len(stocks), batch_size):
-        batch = stocks[i:i + batch_size]
+    def get_bhavcopy(date):
+        date_str = date.strftime("%d%m%Y")
+        url = f"https://archives.nseindia.com/content/fo/fo_{date_str}.csv.gz"
 
         try:
-            df = yf.download(
-                batch,
-                period="10d",
-                interval="1d",
-                group_by="ticker",
-                threads=False,   # 🔥 prevents Yahoo blocking
-                progress=False
-            )
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code != 200:
+                return None
 
-            for s in batch:
-                try:
-                    if s in df.columns.levels[0]:
-                        temp = df[s][["Open", "High", "Low", "Close"]].dropna()
-                        if not temp.empty:
-                            all_data[s] = temp
-                except:
+            with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as f:
+                return pd.read_csv(f)
+        except:
+            return None
+
+    if os.path.exists(FILE):
+        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=True)
+        start = old.index.max() + timedelta(days=1)
+    else:
+        start = datetime.now() - timedelta(days=5)
+
+    end = datetime.now()
+
+    all_days = []
+    cur = start
+
+    while cur <= end:
+        df = get_bhavcopy(cur)
+
+        if df is not None:
+            df = df[df["INSTRUMENT"] == "FUTSTK"]
+
+            day_data = {}
+
+            for _, row in df.iterrows():
+                s = row["SYMBOL"] + ".NS"
+                if stocks and s not in stocks:
                     continue
 
-        except Exception as e:
-            print("Batch failed:", batch, e)
+                day_data.setdefault(s, {})[cur] = {
+                    "Open": row["OPEN"],
+                    "High": row["HIGH"],
+                    "Low": row["LOW"],
+                    "Close": row["CLOSE"]
+                }
 
-        time.sleep(1)  # 🔥 avoid rate limit
+            if day_data:
+                day_df = pd.concat(
+                    {k: pd.DataFrame(v).T for k, v in day_data.items()},
+                    axis=1
+                )
+                all_days.append(day_df)
 
-    if not all_data:
-        print("❌ No OHLC data collected")
+        cur += timedelta(days=1)
+
+    if not all_days:
         return pd.DataFrame()
 
-    result = pd.concat(all_data, axis=1)
-    print("Fetched final shape:", result.shape)
-    return result
+    return pd.concat(all_days).sort_index()
 
 
 def main():
@@ -91,7 +103,7 @@ def main():
     new = fetch(stocks)
 
     if new.empty:
-        print("❌ No new data → exit")
+        print("❌ No new data")
         return
 
     if not old.empty:
@@ -105,7 +117,7 @@ def main():
     os.makedirs("data", exist_ok=True)
     final.to_csv(FILE)
 
-    print("✅ Data updated successfully")
+    print("✅ Updated")
 
 
 if __name__ == "__main__":
