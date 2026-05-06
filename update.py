@@ -20,6 +20,7 @@ def get_fno():
     try:
         session = requests.Session()
         session.get("https://www.nseindia.com", headers=headers, timeout=10)
+
         r = session.get(url, headers=headers, timeout=10)
         r.raise_for_status()
 
@@ -46,11 +47,13 @@ def fetch(stocks):
         except:
             return None
 
-    # 🔥 FIXED DATE HANDLING
+    # ✅ FIXED DATE HANDLING
     if os.path.exists(FILE):
-        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=[0])
-        old.index = pd.to_datetime(old.index, errors="coerce")
-        old = old[~old.index.isna()]
+        old = pd.read_csv(FILE, header=[0, 1], index_col=0)
+
+        # 🔥 FORCE PROPER DATE PARSING (CRITICAL FIX)
+        old.index = pd.to_datetime(old.index, format="%d-%m-%Y", errors="coerce")
+        old = old.dropna()
 
         if old.empty:
             start = datetime.now() - timedelta(days=5)
@@ -59,7 +62,9 @@ def fetch(stocks):
     else:
         start = datetime.now() - timedelta(days=5)
 
-    end = datetime.now()
+    end = datetime.now() - timedelta(days=1)  # avoid incomplete today
+
+    print(f"Fetching from {start.date()} to {end.date()}")
 
     all_days = []
     cur = start
@@ -101,9 +106,11 @@ def fetch(stocks):
 
 def main():
     if os.path.exists(FILE):
-        old = pd.read_csv(FILE, header=[0, 1], index_col=0, parse_dates=[0])
-        old.index = pd.to_datetime(old.index, errors="coerce")
-        old = old[~old.index.isna()]
+        old = pd.read_csv(FILE, header=[0, 1], index_col=0)
+
+        # 🔥 CRITICAL FIX
+        old.index = pd.to_datetime(old.index, format="%d-%m-%Y", errors="coerce")
+        old = old.dropna()
     else:
         old = pd.DataFrame()
 
@@ -125,7 +132,7 @@ def main():
     os.makedirs("data", exist_ok=True)
     final.to_csv(FILE)
 
-    print("✅ Updated")
+    print("✅ Updated successfully")
 
 
 if __name__ == "__main__":
